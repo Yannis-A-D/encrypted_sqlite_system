@@ -74,3 +74,43 @@ def test_db_maintenance():
     stats = db_maintenance()
     assert stats["status"] == "ok"
     assert "size_mb" in stats
+
+
+def test_payload_compression():
+    """Verify large JSON payloads are compressed with zlib."""
+    from src.database import pack_and_encrypt, decrypt_and_unpack
+    import json
+
+    # Create a repetitive 5 KB dictionary (highly compressible)
+    large_payload = {"logs": ["User executed action at timestamp" for _ in range(150)]}
+    raw_bytes = json.dumps(large_payload).encode("utf-8")
+    assert len(raw_bytes) > 4000
+
+    encrypted_blob = pack_and_encrypt(large_payload)
+    # Encrypted compressed blob should be less than 50% of raw size
+    assert len(encrypted_blob) < len(raw_bytes) * 0.40
+
+    recovered = decrypt_and_unpack(encrypted_blob)
+    assert recovered == large_payload
+
+
+def test_rotate_encryption_key():
+    """Test atomic key rotation across multiple database records."""
+    from src.database import rotate_encryption_key, set_cipher_key
+    from cryptography.fernet import Fernet
+
+    old_key = Fernet.generate_key().decode()
+    new_key = Fernet.generate_key().decode()
+
+    set_cipher_key(old_key)
+    kv_set("item_a.json", {"name": "Alpha", "secret": 123})
+    kv_set("item_b.json", {"name": "Beta", "secret": 456})
+
+    # Rotate keys
+    res = rotate_encryption_key(old_key, new_key)
+    assert res["status"] == "ok"
+    assert res["rotated_count"] >= 2
+
+    # Verify records can be read cleanly with new key
+    assert kv_get("item_a.json") == {"name": "Alpha", "secret": 123}
+    assert kv_get("item_b.json") == {"name": "Beta", "secret": 456}

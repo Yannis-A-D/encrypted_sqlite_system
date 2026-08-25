@@ -111,6 +111,32 @@ def cmd_vacuum(args):
     print(f"Result: {res}\n")
 
 
+def cmd_rotate_key(args):
+    """Rotate encryption key across all database records atomically."""
+    from .database import rotate_encryption_key, _get_cipher
+    import os
+
+    old_key = args.old_key or os.getenv("ENCRYPTION_KEY")
+    if not old_key:
+        print("Error: Old encryption key not specified. Provide --old-key or set ENCRYPTION_KEY.")
+        return
+
+    new_key = args.new_key
+    if not new_key:
+        # Generate a new key if not provided
+        new_key = Fernet.generate_key().decode()
+        print(f"Generated new Fernet key: {new_key}")
+
+    print("\nStarting atomic key rotation...")
+    try:
+        res = rotate_encryption_key(old_key, new_key)
+        print(f"✅ Success! {res['message']}")
+        print(f"\nIMPORTANT: Update your .env file with the new key:")
+        print(f"ENCRYPTION_KEY={new_key}\n")
+    except Exception as e:
+        print(f"❌ Key rotation failed: {e}")
+
+
 def cmd_get(args):
     """Fetch and print a decrypted JSON document by key."""
     from .database import kv_get
@@ -147,6 +173,11 @@ def main():
     # vacuum
     subparsers.add_parser("vacuum", help="Run WAL checkpoint truncation and DB optimization")
 
+    # rotate-key
+    p_rot = subparsers.add_parser("rotate-key", help="Re-encrypt all records with a new encryption key")
+    p_rot.add_argument("--new-key", "-n", default=None, help="New Fernet encryption key")
+    p_rot.add_argument("--old-key", "-o", default=None, help="Old Fernet encryption key (defaults to ENCRYPTION_KEY env)")
+
     # get
     p_get = subparsers.add_parser("get", help="Retrieve and print a decrypted document by key")
     p_get.add_argument("key", help="Key name (e.g. user_101.json)")
@@ -163,6 +194,7 @@ def main():
         "export": cmd_export,
         "import": cmd_import,
         "vacuum": cmd_vacuum,
+        "rotate-key": cmd_rotate_key,
         "get": cmd_get,
     }
 

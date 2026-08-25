@@ -46,6 +46,9 @@ dev = [
     "pytest-cov>=4.1.0"
 ]
 
+[project.scripts]
+encrypted-sqlite = "src.cli:main"
+
 [project.urls]
 "Homepage" = "https://github.com/Yannis-A-D/encrypted_sqlite_system"
 "Bug Tracker" = "https://github.com/Yannis-A-D/encrypted_sqlite_system/issues"

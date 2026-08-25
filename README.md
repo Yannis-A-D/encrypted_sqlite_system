@@ -25,7 +25,7 @@ Serves as a transparent, high-speed drop-in replacement for standard flat `.json
 
 ---
 
-## 🏛️ Architecture
+## 🏛️ Architecture & Sequence Flows
 
 ```
  Application / Bot Layer
@@ -46,6 +46,70 @@ Serves as a transparent, high-speed drop-in replacement for standard flat `.json
  └────────────────────────────────────────┘
 ```
 
+### 🔍 Read Sequence Flow
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor App as Python Application
+    participant L1 as Tier 1: L1 RAM (LRU)
+    participant L2 as Tier 2: L2 SQLite (WAL)
+    participant Cipher as AES-128 Cipher
+
+    App->>L1: load_json("user_101.json")
+    alt L1 Cache Hit (<0.01ms)
+        L1-->>App: Return deserialized dict immediately
+    else L1 Cache Miss
+        L1->>L2: SELECT value FROM kv_store WHERE key=?
+        L2->>Cipher: Decrypt raw bytes
+        Cipher-->>L2: Plaintext JSON string
+        L2->>L1: Store into L1 RAM (warm up cache)
+        L1-->>App: Return deserialized dict
+    end
+```
+
+### 💾 Write Sequence Flow (Write-Through)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor App as Python Application
+    participant L1 as Tier 1: L1 RAM (LRU)
+    participant Cipher as AES-128 Cipher
+    participant L2 as Tier 2: L2 SQLite (WAL)
+    participant Disk as Encrypted Disk File
+
+    App->>L1: save_json("user_101.json", data)
+    L1->>L1: Update in-memory LRU cache
+    L1->>Cipher: Encrypt JSON to ciphertext
+    Cipher->>L2: INSERT INTO kv_store (key, value, ts) ON CONFLICT DO UPDATE
+    Cipher->>Disk: Atomic write to user_101.json.tmp -> replace
+    Disk-->>App: Write complete & synchronized
+```
+
+---
+
+## 🖥️ Command Line Interface (CLI)
+
+The package includes a built-in `encrypted-sqlite` CLI command:
+
+```bash
+# 1. Generate an AES-256 key
+encrypted-sqlite keygen
+
+# 2. Inspect database & cache telemetry
+encrypted-sqlite stats
+
+# 3. Export all encrypted database documents to plain JSON
+encrypted-sqlite export --out ./decrypted_export/
+
+# 4. Import JSON files into database
+encrypted-sqlite import ./my_json_folder/
+
+# 5. Checkpoint & optimize database
+encrypted-sqlite vacuum
+```
+
 ---
 
 ## 🚀 Quickstart & Installation
@@ -53,8 +117,8 @@ Serves as a transparent, high-speed drop-in replacement for standard flat `.json
 ### 1. Installation
 
 ```bash
-git clone https://github.com/yourusername/encrypted-sqlite-json.git
-cd encrypted-sqlite-json
+git clone https://github.com/Yannis-A-D/encrypted_sqlite_system.git
+cd encrypted_sqlite_system
 pip install -r requirements.txt
 ```
 

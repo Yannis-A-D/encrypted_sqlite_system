@@ -65,7 +65,7 @@ python generate_key.py
 
 Set the generated key in your `.env` file or environment:
 ```env
-ENCRYPTION_KEY=HKr7gXhnXjBOQLJiURjJiyHxvQuqEVk7SXra4ClbWtQ=
+ENCRYPTION_KEY=your_generated_fernet_key_here=
 ```
 
 ---

@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "encrypted-sqlite-system"
+version = "1.0.0"
+description = "High-performance, AES-128 encrypted SQLite document store and Two-Tier (L1/L2) caching engine for Python."
+readme = "README.md"
+authors = [
+    { name = "Yannis-A-D" }
+]
+license = { text = "MIT" }
+requires-python = ">=3.10"
+keywords = [
+    "sqlite",
+    "encryption",
+    "fernet",
+    "cache",
+    "lru-cache",
+    "two-tier-cache",
+    "json-database",
+    "nosql",
+    "wal-mode",
+    "cryptography"
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Database",
+    "Topic :: Security :: Cryptography",
+    "Topic :: Software Development :: Libraries :: Python Modules"
+]
+dependencies = [
+    "cryptography>=42.0.0"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-cov>=4.1.0"
+]
+
+[project.urls]
+"Homepage" = "https://github.com/Yannis-A-D/encrypted_sqlite_system"
+"Bug Tracker" = "https://github.com/Yannis-A-D/encrypted_sqlite_system/issues"
+"Source Code" = "https://github.com/Yannis-A-D/encrypted_sqlite_system"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]

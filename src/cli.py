@@ -64,12 +64,12 @@ def cmd_stats(args):
 
 
 def cmd_export(args):
-    """Export all decrypted documents to a folder."""
-    from .database import get_db_connection, _get_cipher
+    """Export decrypted (and optionally sanitized) documents to a folder."""
+    from .database import get_db_connection, decrypt_and_unpack
+    from .masking import mask_pii
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    cipher = _get_cipher()
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT key, value FROM kv_store")
@@ -79,19 +79,24 @@ def cmd_export(args):
         print("No records found in database to export.")
         return
 
-    print(f"\nExporting {len(rows)} documents to {out_dir}...")
+    sanitize_mode = getattr(args, "sanitize", False)
+    strategy = getattr(args, "strategy", "partial")
+    custom_fields = args.fields.split(",") if getattr(args, "fields", None) else None
+
+    print(f"\nExporting {len(rows)} documents to {out_dir} (Sanitized: {sanitize_mode})...")
     success = 0
     for row in rows:
         key = row["key"]
         val_bytes = row["value"]
         try:
-            plaintext = cipher.decrypt(val_bytes)
-            data = json.loads(plaintext)
+            data = decrypt_and_unpack(val_bytes)
+            if sanitize_mode:
+                data = mask_pii(data, fields=custom_fields, strategy=strategy)
             target_file = out_dir / (key if key.endswith(".json") else f"{key}.json")
             target_file.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
             success += 1
         except Exception as e:
-            print(f" [!] Failed to decrypt '{key}': {e}")
+            print(f" [!] Failed to process '{key}': {e}")
 
     print(f"Export complete: {success}/{len(rows)} files saved.\n")
 
@@ -165,6 +170,9 @@ def main():
     # export
     p_export = subparsers.add_parser("export", help="Export all decrypted documents to a folder")
     p_export.add_argument("--out", "-o", default="./decrypted_export", help="Output directory")
+    p_export.add_argument("--sanitize", "-s", action="store_true", help="Redact/mask sensitive PII fields (GDPR/privacy)")
+    p_export.add_argument("--strategy", choices=["partial", "full", "hash"], default="partial", help="Masking strategy (default: partial)")
+    p_export.add_argument("--fields", default=None, help="Comma-separated list of custom field names to mask")
 
     # import
     p_import = subparsers.add_parser("import", help="Import JSON files into SQLite database")

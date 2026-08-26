@@ -20,6 +20,7 @@ Serves as a transparent, high-speed drop-in replacement for standard flat `.json
   * **Tier 1 (L1 RAM)**: Thread-safe Least-Recently-Used (LRU) in-memory cache delivering **`< 0.01ms` read latency** with zero disk I/O.
   * **Tier 2 (L2 Storage)**: High-concurrency **SQLite in WAL (Write-Ahead Logging) mode** with atomic transactions.
 * 🗜️ **Adaptive Zlib Compression**: Automatically shrinks large JSON documents by **75% to 90%** before encryption.
+* 🛡️ **Field-Level PII Auto-Masking & GDPR Redaction**: Recursively masks or pseudonymizes sensitive keys (emails, IPs, passwords, tokens) with partial, full, or SHA-256 hash strategies.
 * 🔄 **Atomic Key Rotation**: Zero-downtime database re-encryption with automatic transaction rollback.
 * 📦 **Zero-Config Drop-in**: Replace `json.load()` and `json.dump()` with `load_json()` and `save_json()` without refactoring your codebase.
 
@@ -211,6 +212,34 @@ from src.database import db_maintenance
 # Runs PRAGMA wal_checkpoint(TRUNCATE) and PRAGMA optimize
 maintenance_stats = db_maintenance()
 print(f"Database Size: {maintenance_stats['size_mb']} MB")
+```
+
+---
+
+### 4. Field-Level PII Auto-Masking & GDPR Redaction
+
+```python
+from src.masking import mask_pii, mask_sensitive
+
+user_data = {
+    "username": "AlexDev",
+    "email": "alex.developer@example.com",
+    "ip_address": "192.168.1.100",
+    "password": "SecretPassword123"
+}
+
+# 1. Partial masking (j***e@domain.com, 192.168.***.***)
+clean_data = mask_pii(user_data, strategy="partial")
+print(clean_data)
+# Output: {'username': 'AlexDev', 'email': 'a***r@example.com', 'ip_address': '192.168.***.***', 'password': 'Se************23'}
+
+# 2. Function Decorator for API / Public Logs
+@mask_sensitive(fields={"api_key"}, strategy="full")
+def get_user_session():
+    return {"user": "Alex", "api_key": "sk_live_secret123"}
+
+print(get_user_session())
+# Output: {'user': 'Alex', 'api_key': '[REDACTED]'}
 ```
 
 ---

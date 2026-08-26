@@ -9,10 +9,12 @@ from .database import (
     kv_get,
     kv_set,
     kv_delete,
+    rotate_encryption_key,
     db_maintenance,
 )
 from .cache import TwoTierCache, cache
 from .secure_json import load_json, save_json
+from .masking import mask_pii, mask_sensitive
 
 __version__ = "1.0.0"
 __all__ = [
@@ -21,9 +23,12 @@ __all__ = [
     "kv_get",
     "kv_set",
     "kv_delete",
+    "rotate_encryption_key",
     "db_maintenance",
     "TwoTierCache",
     "cache",
     "load_json",
     "save_json",
+    "mask_pii",
+    "mask_sensitive",
 ]

@@ -19,6 +19,7 @@ Serves as a transparent, high-speed drop-in replacement for standard flat `.json
 * ⚡ **Two-Tier (L1/L2) Caching**:
   * **Tier 1 (L1 RAM)**: Thread-safe Least-Recently-Used (LRU) in-memory cache delivering **`< 0.01ms` read latency** with zero disk I/O.
   * **Tier 2 (L2 Storage)**: High-concurrency **SQLite in WAL (Write-Ahead Logging) mode** with atomic transactions.
+* ⚡ **Native Asynchronous API (`async_load_json` / `async_save_json`)**: Complete non-blocking `async`/`await` support for Discord.py, FastAPI, AIOHTTP, and asyncio event loops.
 * 🗜️ **Adaptive Zlib Compression**: Automatically shrinks large JSON documents by **75% to 90%** before encryption.
 * 🛡️ **Field-Level PII Auto-Masking & GDPR Redaction**: Recursively masks or pseudonymizes sensitive keys (emails, IPs, passwords, tokens) with partial, full, or SHA-256 hash strategies.
 * 🔄 **Atomic Key Rotation**: Zero-downtime database re-encryption with automatic transaction rollback.
@@ -240,6 +241,31 @@ def get_user_session():
 
 print(get_user_session())
 # Output: {'user': 'Alex', 'api_key': '[REDACTED]'}
+```
+
+---
+
+### 5. Native Asynchronous API (Discord.py / FastAPI)
+
+```python
+import asyncio
+from src import async_load_json, async_save_json, async_delete_json
+
+async def main():
+    # 1. Non-blocking Save (Offloads encryption & disk I/O to background thread)
+    await async_save_json("user_101.json", {"username": "Alex", "level": 50})
+
+    # 2. Non-blocking Load (Instant L1 RAM hit or background SQLite fetch)
+    data = await async_load_json("user_101.json")
+    print(f"Loaded User: {data['username']} (Level {data['level']})")
+
+    # 3. Concurrent Batch Operations
+    await asyncio.gather(
+        async_save_json("user_102.json", {"username": "Sarah", "level": 32}),
+        async_save_json("user_103.json", {"username": "John", "level": 18})
+    )
+
+asyncio.run(main())
 ```
 
 ---

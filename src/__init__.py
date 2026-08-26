@@ -15,6 +15,13 @@ from .database import (
 from .cache import TwoTierCache, cache
 from .secure_json import load_json, save_json
 from .masking import mask_pii, mask_sensitive
+from .async_engine import (
+    async_load_json,
+    async_save_json,
+    async_delete_json,
+    async_db_maintenance,
+    async_rotate_encryption_key,
+)
 
 __version__ = "1.0.0"
 __all__ = [
@@ -31,4 +38,9 @@ __all__ = [
     "save_json",
     "mask_pii",
     "mask_sensitive",
+    "async_load_json",
+    "async_save_json",
+    "async_delete_json",
+    "async_db_maintenance",
+    "async_rotate_encryption_key",
 ]

@@ -194,6 +194,75 @@ def kv_delete(key: str) -> bool:
         return cur.rowcount > 0
 
 
+def kv_mget(keys: list[str]) -> dict[str, Any]:
+    """
+    Retrieve and decrypt multiple JSON documents in a single SQL batch query
+    with parallel multi-core thread pool decryption.
+    """
+    if not keys:
+        return {}
+
+    init_db()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    placeholders = ",".join("?" * len(keys))
+    cursor.execute(f"SELECT key, value FROM kv_store WHERE key IN ({placeholders})", keys)
+    rows = cursor.fetchall()
+
+    if not rows:
+        return {}
+
+    results = {}
+    if len(rows) > 8:
+        # Parallel decryption across CPU cores for large batches
+        from concurrent.futures import ThreadPoolExecutor
+        def _decrypt_item(row):
+            try:
+                return row["key"], decrypt_and_unpack(row["value"])
+            except Exception:
+                return row["key"], None
+
+        with ThreadPoolExecutor(max_workers=min(16, os.cpu_count() or 4)) as executor:
+            for k, val in executor.map(_decrypt_item, rows):
+                if val is not None:
+                    results[k] = val
+    else:
+        for row in rows:
+            try:
+                results[row["key"]] = decrypt_and_unpack(row["value"])
+            except Exception:
+                pass
+
+    return results
+
+
+def kv_mset(mapping: dict[str, Any]):
+    """
+    Compress, encrypt, and commit multiple JSON documents in a single atomic SQL transaction.
+    """
+    if not mapping:
+        return
+
+    init_db()
+    conn = get_db_connection()
+    import time
+    now_ts = int(time.time())
+
+    batch_records = []
+    for key, data in mapping.items():
+        encrypted_blob = pack_and_encrypt(data)
+        batch_records.append((key, encrypted_blob, now_ts))
+
+    with conn:
+        conn.executemany("""
+            INSERT INTO kv_store (key, value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = excluded.updated_at;
+        """, batch_records)
+
+
 def rotate_encryption_key(old_key: str | bytes, new_key: str | bytes) -> dict:
     """
     Re-encrypt all records in SQLite using a new encryption key atomically.

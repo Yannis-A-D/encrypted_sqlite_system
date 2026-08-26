@@ -8,6 +8,8 @@ from .database import (
     get_db_connection,
     kv_get,
     kv_set,
+    kv_mget,
+    kv_mset,
     kv_delete,
     rotate_encryption_key,
     db_maintenance,
@@ -23,7 +25,8 @@ from .async_engine import (
     async_rotate_encryption_key,
 )
 from .integrity import verify_database_integrity, compute_record_checksum
-from .adapters import BaseL1Adapter, MemoryL1Adapter, RedisL1Adapter
+from .adapters import BaseL1Adapter, MemoryL1Adapter, CompressedMemoryL1Adapter, RedisL1Adapter
+from .write_behind import WriteBehindEngine
 
 __version__ = "1.0.0"
 __all__ = [
@@ -31,6 +34,8 @@ __all__ = [
     "get_db_connection",
     "kv_get",
     "kv_set",
+    "kv_mget",
+    "kv_mset",
     "kv_delete",
     "rotate_encryption_key",
     "db_maintenance",
@@ -49,5 +54,7 @@ __all__ = [
     "compute_record_checksum",
     "BaseL1Adapter",
     "MemoryL1Adapter",
+    "CompressedMemoryL1Adapter",
     "RedisL1Adapter",
+    "WriteBehindEngine",
 ]

@@ -256,4 +256,4 @@ If you find this project useful or helpful for your own applications, please con
 
 ---
 
-<sub>🤖 *Note: This README documentation, architecture diagrams, and benchmark suite were created with AI assistance.*</sub>
+<sub>🤖 *Note: This README documentation was created by AI.*</sub>

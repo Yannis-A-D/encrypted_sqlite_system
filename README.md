@@ -1,6 +1,7 @@
 # 🔐 Encrypted SQLite JSON & Two-Tier Caching Engine
 
 [![CI Tests](https://github.com/Yannis-A-D/encrypted_sqlite_system/actions/workflows/tests.yml/badge.svg)](https://github.com/Yannis-A-D/encrypted_sqlite_system/actions/workflows/tests.yml)
+[![PyPI Version](https://img.shields.io/pypi/v/encrypted-sqlite-system.svg)](https://pypi.org/project/encrypted-sqlite-system/)
 [![Python Version](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![Encryption](https://img.shields.io/badge/encryption-AES--128%20Fernet-brightgreen.svg)](https://cryptography.io/)
 [![Database](https://img.shields.io/badge/storage-SQLite%20WAL-orange.svg)](https://sqlite.org/)
@@ -136,6 +137,12 @@ encrypted-sqlite vacuum
 
 ### 1. Installation
 
+**Via PyPI**:
+```bash
+pip install encrypted-sqlite-system
+```
+
+**Or from Source**:
 ```bash
 git clone https://github.com/Yannis-A-D/encrypted_sqlite_system.git
 cd encrypted_sqlite_system

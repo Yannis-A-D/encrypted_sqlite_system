@@ -248,3 +248,12 @@ python examples/quickstart_demo.py
 ## 📄 License
 
 This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
+
+---
+
+### ⭐ Support the Project
+If you find this project useful or helpful for your own applications, please consider giving it a **Star** on GitHub — it helps others discover the project!
+
+---
+
+<sub>🤖 *Note: This README documentation, architecture diagrams, and benchmark suite were created with AI assistance.*</sub>

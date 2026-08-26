@@ -18,10 +18,30 @@ Serves as a transparent, high-speed drop-in replacement for standard flat `.json
 * ⚡ **Two-Tier (L1/L2) Caching**:
   * **Tier 1 (L1 RAM)**: Thread-safe Least-Recently-Used (LRU) in-memory cache delivering **`< 0.01ms` read latency** with zero disk I/O.
   * **Tier 2 (L2 Storage)**: High-concurrency **SQLite in WAL (Write-Ahead Logging) mode** with atomic transactions.
-* 🔄 **Write-Through Synchronization**: Automatically keeps in-memory state, SQLite database, and optional disk backups in 100% sync.
-* 🛡️ **Zero Thread Locks**: Fully concurrent multi-threaded reads and writes using SQLite WAL mode and thread-local connection pooling.
-* 🧹 **Automated Checkpointing & Vacuuming**: Built-in maintenance engine flushes WAL write journals and optimizes B-tree storage.
+* 🗜️ **Adaptive Zlib Compression**: Automatically shrinks large JSON documents by **75% to 90%** before encryption.
+* 🔄 **Atomic Key Rotation**: Zero-downtime database re-encryption with automatic transaction rollback.
 * 📦 **Zero-Config Drop-in**: Replace `json.load()` and `json.dump()` with `load_json()` and `save_json()` without refactoring your codebase.
+
+---
+
+## ⚡ Performance & Benchmarks
+
+Benchmarked over **1,000 read operations** with 5 KB JSON payload on an NVMe SSD:
+
+| Storage Strategy | Avg Latency | P95 Latency | Throughput | Speedup |
+| :--- | :--- | :--- | :--- | :--- |
+| **1. Standard JSON (Disk/SSD)** | `0.0607 ms` | `0.1139 ms` | 16,474 ops/sec | 1.0x (Baseline) |
+| **2. L2 Encrypted SQLite (WAL)** | `0.0238 ms` | `0.0277 ms` | 42,049 ops/sec | **2.6x Faster** |
+| **3. Two-Tier L1 Cache (RAM)** | **`0.0067 ms`** | **`0.0072 ms`** | **148,304 ops/sec** | 🚀 **9.0x Faster** |
+
+```text
+Throughput Comparison (Higher is Better):
+Standard JSON (Disk)  |###--------------------------------|  16,474 ops/sec
+L2 Encrypted SQLite   |#########--------------------------|  42,049 ops/sec
+Two-Tier L1 RAM Cache |###################################| 148,304 ops/sec
+```
+
+> **Run the benchmark yourself**: `python benchmarks/benchmark.py 1000`
 
 ---
 

@@ -22,6 +22,8 @@ from .async_engine import (
     async_db_maintenance,
     async_rotate_encryption_key,
 )
+from .integrity import verify_database_integrity, compute_record_checksum
+from .adapters import BaseL1Adapter, MemoryL1Adapter, RedisL1Adapter
 
 __version__ = "1.0.0"
 __all__ = [
@@ -43,4 +45,9 @@ __all__ = [
     "async_delete_json",
     "async_db_maintenance",
     "async_rotate_encryption_key",
+    "verify_database_integrity",
+    "compute_record_checksum",
+    "BaseL1Adapter",
+    "MemoryL1Adapter",
+    "RedisL1Adapter",
 ]

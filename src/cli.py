@@ -153,19 +153,42 @@ def cmd_get(args):
         print(json.dumps(data, indent=2, ensure_ascii=False))
 
 
+def cmd_verify(args):
+    """Run a complete cryptographic integrity and anti-tamper audit."""
+    from .integrity import verify_database_integrity
+
+    print("\n" + "=" * 60)
+    print(" 🛡️ CRYPTOGRAPHIC DATABASE INTEGRITY AUDIT")
+    print("=" * 60)
+
+    res = verify_database_integrity()
+    print(f" - Status            : {res['status'].upper()}")
+    print(f" - Total Inspected   : {res['total_records']} records")
+    print(f" - Cryptographically Valid : {res['valid_records']}")
+    print(f" - Corrupted/Tampered      : {res['corrupted_records']}")
+
+    if res['corrupted_records'] > 0:
+        print("\n [!] CORRUPTED RECORDS DETECTED:")
+        for item in res['corrupted_keys']:
+            print(f"   - {item['key']}: {item['reason']}")
+        print("\n [ALERT] Database has failed cryptographic integrity check!")
+    else:
+        print("\n ✅ 100% CLEAN: All records passed cryptographic signature verification.")
+    print("=" * 60 + "\n")
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="encrypted-sqlite",
-        description="CLI tool for Encrypted SQLite Document Store & Two-Tier Cache"
+        description="Encrypted SQLite JSON & Two-Tier Caching CLI Utility"
     )
     subparsers = parser.add_subparsers(dest="command", help="Available subcommands")
 
     # keygen
-    subparsers.add_parser("keygen", help="Generate a new AES encryption key")
+    subparsers.add_parser("keygen", help="Generate a new cryptographic AES-256 Fernet key")
 
     # stats
-    p_stats = subparsers.add_parser("stats", help="Show database & cache telemetry")
-    p_stats.add_argument("path", nargs="?", default=None, help="Optional database file path")
+    subparsers.add_parser("stats", help="Display storage, telemetry, and L1 cache hit metrics")
 
     # export
     p_export = subparsers.add_parser("export", help="Export all decrypted documents to a folder")
@@ -176,7 +199,7 @@ def main():
 
     # import
     p_import = subparsers.add_parser("import", help="Import JSON files into SQLite database")
-    p_import.add_argument("folder", help="Folder containing .json files")
+    p_import.add_argument("path", help="Path to a JSON file or directory of JSON files")
 
     # vacuum
     subparsers.add_parser("vacuum", help="Run WAL checkpoint truncation and DB optimization")
@@ -185,6 +208,9 @@ def main():
     p_rot = subparsers.add_parser("rotate-key", help="Re-encrypt all records with a new encryption key")
     p_rot.add_argument("--new-key", "-n", default=None, help="New Fernet encryption key")
     p_rot.add_argument("--old-key", "-o", default=None, help="Old Fernet encryption key (defaults to ENCRYPTION_KEY env)")
+
+    # verify
+    subparsers.add_parser("verify", help="Run cryptographic integrity check against bit-rot and tampering")
 
     # get
     p_get = subparsers.add_parser("get", help="Retrieve and print a decrypted document by key")
@@ -203,6 +229,7 @@ def main():
         "import": cmd_import,
         "vacuum": cmd_vacuum,
         "rotate-key": cmd_rotate_key,
+        "verify": cmd_verify,
         "get": cmd_get,
     }
 

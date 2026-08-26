@@ -17,8 +17,8 @@ Serves as a transparent, high-speed drop-in replacement for standard flat `.json
 
 * 🔒 **AES-128 Fernet Encryption at Rest**: All JSON documents and database tables are encrypted before touching physical storage.
 * ⚡ **Two-Tier (L1/L2) Caching**:
-  * **Tier 1 (L1 RAM)**: Thread-safe Least-Recently-Used (LRU) in-memory cache delivering **`< 0.01ms` read latency** with zero disk I/O.
-  * **Tier 2 (L2 Storage)**: High-concurrency **SQLite in WAL (Write-Ahead Logging) mode** with atomic transactions.
+* ⚡ **Pluggable Distributed L1 Cache (Memory / Redis)**: Seamlessly switch between local LRU in-memory RAM cache (`<0.01ms`) and shared distributed Redis cache for multi-server clusters.
+* 🛡️ **Cryptographic Integrity & Anti-Tamper Audit (`verify`)**: HMAC-SHA256 authenticated verification detecting bit-rot, corruption, or offline tampering.
 * ⚡ **Native Asynchronous API (`async_load_json` / `async_save_json`)**: Complete non-blocking `async`/`await` support for Discord.py, FastAPI, AIOHTTP, and asyncio event loops.
 * 🗜️ **Adaptive Zlib Compression**: Automatically shrinks large JSON documents by **75% to 90%** before encryption.
 * 🛡️ **Field-Level PII Auto-Masking & GDPR Redaction**: Recursively masks or pseudonymizes sensitive keys (emails, IPs, passwords, tokens) with partial, full, or SHA-256 hash strategies.
@@ -266,6 +266,38 @@ async def main():
     )
 
 asyncio.run(main())
+```
+
+---
+
+### 6. Pluggable Distributed Redis L1 Cache
+
+```python
+from src.cache import cache
+
+# Switch Tier 1 to a shared Redis instance across cluster nodes
+cache.use_redis("redis://localhost:6379/0", prefix="my_app:l1:")
+
+# Reads and writes now use Redis as L1 RAM and Encrypted SQLite as L2 persistence!
+cache.set("cluster_config.json", {"active_node": 1})
+config = cache.get("cluster_config.json")
+```
+
+---
+
+### 7. Cryptographic Integrity & Anti-Tamper Audit
+
+```python
+from src import verify_database_integrity
+
+# Verify all records against bit-rot, corruption, and offline tampering
+audit_report = verify_database_integrity()
+print(f"Status: {audit_report['status']} | Clean: {audit_report['valid_records']}/{audit_report['total_records']}")
+```
+
+```bash
+# Or run from the command line:
+encrypted-sqlite verify
 ```
 
 ---

@@ -17,6 +17,7 @@ Serves as a transparent, high-speed drop-in replacement for standard flat `.json
 
 * 🔒 **AES-128 Fernet Encryption at Rest**: All JSON documents and database tables are encrypted before touching physical storage.
 * ⚡ **Two-Tier (L1/L2) Caching**:
+* ☁️ **Encrypted Cloud Disaster Recovery Sync**: Non-blocking live online database backups streamed to **Cloudflare R2**, **AWS S3**, **Backblaze B2**, or **MinIO** with automated retention pruning.
 * 🔍 **Fast Document Query & Wildcard Search**: Query encrypted documents with wildcard glob patterns (`kv_search`) or custom Python predicate filters (`kv_find`) with parallel multi-core decryption.
 * 🌊 **Asynchronous Write-Behind Batch Journaling**: Coalesces high-frequency writes in memory and flushes them to SQLite in bulk transactions (over **300,000 writes/sec**).
 * 🏎️ **Multi-Key Batch Operations & Parallel Decryption (`kv_mget` / `kv_mset`)**: Loads and saves multiple keys in a single SQL roundtrip with parallel multi-core CPU thread pool decryption.
@@ -374,6 +375,31 @@ total_users = kv_count("user_*.json")
 # Or search from the command line:
 encrypted-sqlite find --pattern "user_*" --limit 50
 encrypted-sqlite count --pattern "ticket_*"
+```
+
+---
+
+### 12. Encrypted Cloud Backup & Disaster Recovery (Cloudflare R2 / AWS S3)
+
+```python
+from src import cloud_sync
+
+# 1. Create live point-in-time snapshot and sync to Cloudflare R2 / S3
+result = cloud_sync.sync_to_cloud(retention_count=7)
+print(f"Uploaded: {result['snapshot_file']} (SHA-256: {result['sha256']})")
+
+# 2. List remote cloud backups
+backups = cloud_sync.list_cloud_backups()
+
+# 3. One-line disaster recovery restore
+cloud_sync.restore_from_cloud("backups/snapshot_20260827_214500.db")
+```
+
+```bash
+# Or run from the command line:
+encrypted-sqlite cloud-backup --retention 7
+encrypted-sqlite cloud-list
+encrypted-sqlite cloud-restore backups/snapshot_20260827.db
 ```
 
 ---

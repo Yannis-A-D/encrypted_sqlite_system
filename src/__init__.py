@@ -30,11 +30,14 @@ from .async_engine import (
     async_search,
     async_find,
     async_count,
+    async_cloud_backup,
+    async_cloud_restore,
 )
 from .integrity import verify_database_integrity, compute_record_checksum
 from .adapters import BaseL1Adapter, MemoryL1Adapter, CompressedMemoryL1Adapter, RedisL1Adapter
 from .write_behind import WriteBehindEngine
 from .bloom_filter import BloomFilter
+from .cloud_sync import CloudSyncEngine, cloud_sync
 from . import serializers
 
 __version__ = "1.0.0"
@@ -66,6 +69,8 @@ __all__ = [
     "async_search",
     "async_find",
     "async_count",
+    "async_cloud_backup",
+    "async_cloud_restore",
     "verify_database_integrity",
     "compute_record_checksum",
     "BaseL1Adapter",
@@ -74,5 +79,7 @@ __all__ = [
     "RedisL1Adapter",
     "WriteBehindEngine",
     "BloomFilter",
+    "CloudSyncEngine",
+    "cloud_sync",
     "serializers",
 ]

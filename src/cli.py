@@ -220,6 +220,63 @@ def main():
     p_export.add_argument("--strategy", choices=["partial", "full", "hash"], default="partial", help="Masking strategy (default: partial)")
     p_export.add_argument("--fields", default=None, help="Comma-separated list of custom field names to mask")
 
+def cmd_cloud_backup(args):
+    """Create a live online snapshot and upload to S3/Cloudflare R2."""
+    from .cloud_sync import cloud_sync
+    print("\n📦 Creating live online database snapshot...")
+    res = cloud_sync.sync_to_cloud(retention_count=args.retention)
+    print(f"✅ Snapshot created: {res['snapshot_file']} ({res['size_bytes']:,} bytes)")
+    print(f"🔒 SHA-256 Checksum: {res['sha256']}")
+    if cloud_sync._get_s3_client() is not None:
+        print(f"☁️ Successfully synced to cloud bucket: {res['bucket']} ({res['remote_key']})\n")
+    else:
+        print(f"📁 Saved locally to data/snapshots/ (To enable cloud S3 sync, set S3_BUCKET_NAME / S3_ENDPOINT_URL env vars).\n")
+
+
+def cmd_cloud_list(args):
+    """List available backups in cloud bucket."""
+    from .cloud_sync import cloud_sync
+    backups = cloud_sync.list_cloud_backups()
+    if not backups:
+        print(f"\nNo cloud backups found in bucket '{cloud_sync.bucket_name}'.")
+    else:
+        print(f"\n☁️ Remote Cloud Backups in '{cloud_sync.bucket_name}':")
+        for b in backups:
+            print(f"  - {b['key']} ({b['size_bytes']:,} bytes) — {b['last_modified']}")
+    print()
+
+
+def cmd_cloud_restore(args):
+    """Restore database from a remote cloud backup."""
+    from .cloud_sync import cloud_sync
+    print(f"\n⏳ Restoring database from cloud backup: '{args.key}'...")
+    success = cloud_sync.restore_from_cloud(args.key)
+    if success:
+        print("✅ Database successfully restored from cloud backup!\n")
+    else:
+        print("❌ Cloud restore failed. Check S3 credentials and backup key name.\n")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="encrypted-sqlite",
+        description="Encrypted SQLite JSON & Two-Tier Caching CLI Utility"
+    )
+    subparsers = parser.add_subparsers(dest="command", help="Available subcommands")
+
+    # keygen
+    subparsers.add_parser("keygen", help="Generate a new cryptographic AES-256 Fernet key")
+
+    # stats
+    subparsers.add_parser("stats", help="Display storage, telemetry, and L1 cache hit metrics")
+
+    # export
+    p_export = subparsers.add_parser("export", help="Export all decrypted documents to a folder")
+    p_export.add_argument("--out", "-o", default="./decrypted_export", help="Output directory")
+    p_export.add_argument("--sanitize", "-s", action="store_true", help="Redact/mask sensitive PII fields (GDPR/privacy)")
+    p_export.add_argument("--strategy", choices=["partial", "full", "hash"], default="partial", help="Masking strategy (default: partial)")
+    p_export.add_argument("--fields", default=None, help="Comma-separated list of custom field names to mask")
+
     # import
     p_import = subparsers.add_parser("import", help="Import JSON files into SQLite database")
     p_import.add_argument("path", help="Path to a JSON file or directory of JSON files")
@@ -248,6 +305,17 @@ def main():
     p_count = subparsers.add_parser("count", help="Count total stored documents in the database")
     p_count.add_argument("--pattern", "-p", default=None, help="Optional glob pattern filter")
 
+    # cloud-backup
+    p_cb = subparsers.add_parser("cloud-backup", help="Create live snapshot and sync to Cloudflare R2 / AWS S3")
+    p_cb.add_argument("--retention", "-r", type=int, default=7, help="Number of recent backups to retain (default: 7)")
+
+    # cloud-list
+    subparsers.add_parser("cloud-list", help="List remote backups available in S3 / R2 bucket")
+
+    # cloud-restore
+    p_cr = subparsers.add_parser("cloud-restore", help="Restore database from a remote cloud backup key")
+    p_cr.add_argument("key", help="Remote backup key (e.g. backups/snapshot_20260827.db)")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -265,6 +333,9 @@ def main():
         "get": cmd_get,
         "find": cmd_find,
         "count": cmd_count,
+        "cloud-backup": cmd_cloud_backup,
+        "cloud-list": cmd_cloud_list,
+        "cloud-restore": cmd_cloud_restore,
     }
 
     cmd_fn = dispatch.get(args.command)

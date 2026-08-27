@@ -88,3 +88,15 @@ async def async_rotate_encryption_key(old_key: str | bytes, new_key: str | bytes
     Asynchronously re-encrypt all records with a new encryption key.
     """
     return await asyncio.to_thread(rotate_encryption_key, old_key, new_key)
+
+
+async def async_cloud_backup(retention_count: int = 7) -> dict:
+    """Asynchronously create and upload encrypted snapshot to S3/Cloudflare R2."""
+    from .cloud_sync import cloud_sync
+    return await asyncio.to_thread(cloud_sync.sync_to_cloud, retention_count=retention_count)
+
+
+async def async_cloud_restore(remote_key: str) -> bool:
+    """Asynchronously restore database from cloud backup."""
+    from .cloud_sync import cloud_sync
+    return await asyncio.to_thread(cloud_sync.restore_from_cloud, remote_key=remote_key)

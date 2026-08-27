@@ -13,6 +13,7 @@ from .database import (
     kv_delete,
     rotate_encryption_key,
     db_maintenance,
+    bloom,
 )
 from .cache import TwoTierCache, cache
 from .secure_json import load_json, save_json
@@ -27,6 +28,7 @@ from .async_engine import (
 from .integrity import verify_database_integrity, compute_record_checksum
 from .adapters import BaseL1Adapter, MemoryL1Adapter, CompressedMemoryL1Adapter, RedisL1Adapter
 from .write_behind import WriteBehindEngine
+from .bloom_filter import BloomFilter
 
 __version__ = "1.0.0"
 __all__ = [
@@ -39,6 +41,7 @@ __all__ = [
     "kv_delete",
     "rotate_encryption_key",
     "db_maintenance",
+    "bloom",
     "TwoTierCache",
     "cache",
     "load_json",
@@ -57,4 +60,5 @@ __all__ = [
     "CompressedMemoryL1Adapter",
     "RedisL1Adapter",
     "WriteBehindEngine",
+    "BloomFilter",
 ]

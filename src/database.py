@@ -100,8 +100,14 @@ def decrypt_and_unpack(encrypted_blob: bytes, cipher: Fernet | None = None) -> A
     return json.loads(raw_json.decode("utf-8"))
 
 
+from .bloom_filter import BloomFilter
+
+# In-Memory Bloom Filter for 0-Disk Misses
+bloom = BloomFilter(expected_elements=50000, false_positive_rate=0.01)
+
+
 def get_db_connection() -> sqlite3.Connection:
-    """Obtain a thread-local SQLite connection configured with WAL mode."""
+    """Obtain a thread-local SQLite connection configured with WAL and MMAP mode."""
     if hasattr(_local, "conn") and _local.conn is not None:
         return _local.conn
 
@@ -114,19 +120,22 @@ def get_db_connection() -> sqlite3.Connection:
     )
     conn.row_factory = sqlite3.Row
 
-    # Performance and Concurrency PRAGMAs
+    # Performance, MMAP & Concurrency PRAGMAs
     conn.execute("PRAGMA journal_mode = WAL;")
     conn.execute("PRAGMA synchronous = NORMAL;")
     conn.execute("PRAGMA foreign_keys = ON;")
     conn.execute("PRAGMA busy_timeout = 30000;")
-    conn.execute("PRAGMA cache_size = -64000;")  # 64 MB in-memory cache
+    conn.execute("PRAGMA cache_size = -64000;")         # 64 MB Page Cache
+    conn.execute("PRAGMA mmap_size = 268435456;")       # 256 MB Direct Kernel Memory-Mapped I/O
+    conn.execute("PRAGMA temp_store = MEMORY;")         # RAM-based temporary structures
+    conn.execute("PRAGMA wal_autocheckpoint = 1000;")
 
     _local.conn = conn
     return conn
 
 
 def init_db():
-    """Idempotently initialize database tables and indexes."""
+    """Idempotently initialize database tables, indexes, and populate bloom filter."""
     global _db_initialized
     if _db_initialized:
         return
@@ -145,6 +154,15 @@ def init_db():
                 );
             """)
 
+        # Populate in-memory bloom filter from existing keys
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT key FROM kv_store")
+            for r in cur.fetchall():
+                bloom.add(r["key"])
+        except Exception:
+            pass
+
         _db_initialized = True
 
 
@@ -153,6 +171,11 @@ def init_db():
 def kv_get(key: str, default: Any = None) -> Any:
     """Retrieve, decrypt, and decompress a JSON document from kv_store."""
     init_db()
+
+    # Fast Bloom filter check: if definitely not in database, return 0-disk miss immediately
+    if not bloom.contains(key):
+        return default
+
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT value FROM kv_store WHERE key = ?", (key,))
@@ -183,6 +206,8 @@ def kv_set(key: str, data: Any):
                 value = excluded.value,
                 updated_at = excluded.updated_at;
         """, (key, encrypted_blob, now_ts))
+
+    bloom.add(key)
 
 
 def kv_delete(key: str) -> bool:
@@ -252,6 +277,7 @@ def kv_mset(mapping: dict[str, Any]):
     for key, data in mapping.items():
         encrypted_blob = pack_and_encrypt(data)
         batch_records.append((key, encrypted_blob, now_ts))
+        bloom.add(key)
 
     with conn:
         conn.executemany("""

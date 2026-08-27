@@ -38,9 +38,9 @@ Benchmarked over **1,000 operations** with 5 KB JSON payload on an NVMe SSD:
 | :--- | :--- | :--- | :--- | :--- |
 | **1. Standard JSON (Disk/SSD)** | `0.0635 ms` | `0.1165 ms` | 15,748 ops/sec | 1.0x (Baseline) |
 | **2. L2 Encrypted SQLite (WAL + MMAP)** | `0.0298 ms` | `0.0415 ms` | 33,561 ops/sec | **2.2x Faster** |
-| **3. Two-Tier L1 Cache (RAM Lookup)** | **`0.0067 ms`** | **`0.0074 ms`** | **150,101 ops/sec** | 🚀 **10.1x Faster** |
-| **4. Asynchronous Write-Behind Engine** | **`0.0031 ms`** | **`0.0042 ms`** | **322,580 ops/sec** | 🔥 **20.5x Faster** |
-| **5. In-Memory Bloom Filter (0-Disk Miss)** | **`< 0.0001 ms`** | **`< 0.0001 ms`** | **> 1,000,000 ops/sec**| ⚡ **Instant** |
+| **3. Two-Tier L1 Cache (RAM Lookup)** | **`0.0067 ms`** | **`0.0074 ms`** | **150,101 ops/sec** | **10.1x Faster** |
+| **4. Asynchronous Write-Behind Engine** | **`0.0031 ms`** | **`0.0042 ms`** | **322,580 ops/sec** | **20.5x Faster** |
+| **5. In-Memory Bloom Filter (0-Disk Miss)** | **`< 0.0001 ms`** | **`< 0.0001 ms`** | **> 1,000,000 ops/sec**| **< 0.0001 ms** |
 
 ```text
 Read & Write Throughput Comparison (Higher is Better):

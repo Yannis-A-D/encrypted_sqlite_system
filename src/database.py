@@ -66,38 +66,41 @@ def set_cipher_key(new_key: str | bytes):
     _cipher = Fernet(new_key)
 
 
+from . import serializers
+
+
 def pack_and_encrypt(data: Any, cipher: Fernet | None = None) -> bytes:
-    """Serialize, optionally compress, and encrypt a Python object."""
+    """Serialize with zero-copy serializer, compress with zlib, and encrypt."""
     if cipher is None:
         cipher = _get_cipher()
 
-    raw_json = json.dumps(data, ensure_ascii=False).encode("utf-8")
+    raw_bytes = serializers.dumps(data)
 
     # Compress if payload is larger than 128 bytes
-    if len(raw_json) > 128:
-        payload = _MAGIC_COMPRESSED + zlib.compress(raw_json, level=6)
+    if len(raw_bytes) > 128:
+        payload = _MAGIC_COMPRESSED + zlib.compress(raw_bytes, level=6)
     else:
-        payload = _MAGIC_RAW + raw_json
+        payload = _MAGIC_RAW + raw_bytes
 
     return cipher.encrypt(payload)
 
 
 def decrypt_and_unpack(encrypted_blob: bytes, cipher: Fernet | None = None) -> Any:
-    """Decrypt, decompress, and deserialize encrypted payload."""
+    """Decrypt, decompress, and deserialize payload."""
     if cipher is None:
         cipher = _get_cipher()
 
     decrypted = cipher.decrypt(encrypted_blob)
 
     if decrypted.startswith(_MAGIC_COMPRESSED):
-        raw_json = zlib.decompress(decrypted[len(_MAGIC_COMPRESSED):])
+        raw_bytes = zlib.decompress(decrypted[len(_MAGIC_COMPRESSED):])
     elif decrypted.startswith(_MAGIC_RAW):
-        raw_json = decrypted[len(_MAGIC_RAW):]
+        raw_bytes = decrypted[len(_MAGIC_RAW):]
     else:
         # Legacy uncompressed data
-        raw_json = decrypted
+        raw_bytes = decrypted
 
-    return json.loads(raw_json.decode("utf-8"))
+    return serializers.loads(raw_bytes)
 
 
 from .bloom_filter import BloomFilter

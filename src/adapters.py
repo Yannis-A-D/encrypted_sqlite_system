@@ -84,8 +84,9 @@ class CompressedMemoryL1Adapter(BaseL1Adapter):
             if expire_at == 0 or now < expire_at:
                 self.store.move_to_end(key)
                 try:
+                    from . import serializers
                     decompressed = self._zlib.decompress(raw_blob)
-                    return json.loads(decompressed.decode("utf-8")), True
+                    return serializers.loads(decompressed), True
                 except Exception:
                     pass
             else:
@@ -96,8 +97,9 @@ class CompressedMemoryL1Adapter(BaseL1Adapter):
         now = time.time()
         expire_at = (now + ttl_seconds) if ttl_seconds > 0 else 0
         try:
-            raw_json = json.dumps(value, ensure_ascii=False).encode("utf-8")
-            compressed = self._zlib.compress(raw_json, level=1)
+            from . import serializers
+            raw_bytes = serializers.dumps(value)
+            compressed = self._zlib.compress(raw_bytes, level=1)
             if key in self.store:
                 self.store.move_to_end(key)
             self.store[key] = (compressed, expire_at)
@@ -137,16 +139,18 @@ class RedisL1Adapter(BaseL1Adapter):
 
     def get(self, key: str) -> tuple[Any, bool]:
         try:
+            from . import serializers
             raw = self.client.get(self._format_key(key))
             if raw is not None:
-                return json.loads(raw), True
+                return serializers.loads(raw), True
         except Exception:
             pass
         return None, False
 
     def set(self, key: str, value: Any, ttl_seconds: float = 0):
         try:
-            payload = json.dumps(value, ensure_ascii=False)
+            from . import serializers
+            payload = serializers.dumps(value)
             r_key = self._format_key(key)
             if ttl_seconds > 0:
                 self.client.setex(r_key, int(ttl_seconds), payload)

@@ -85,6 +85,10 @@ class WriteBehindEngine:
                         updated_at = excluded.updated_at;
                 """, batch_records)
 
+            from .database import bloom
+            for key, _, _ in batch_records:
+                bloom.add(key)
+
             self._flushes_count += 1
             self._items_flushed_count += len(batch_records)
 

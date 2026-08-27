@@ -8,13 +8,63 @@ Usage:
   encrypted-sqlite import ./json_folder/
   encrypted-sqlite vacuum [db_path]
   encrypted-sqlite get <key>
+  encrypted-sqlite find --pattern "user_*"
+  encrypted-sqlite count
+  encrypted-sqlite cloud-backup
+  encrypted-sqlite cloud-list
+  encrypted-sqlite cloud-restore <key>
 """
 
 import sys
 import json
+import os
 import argparse
 from pathlib import Path
 from cryptography.fernet import Fernet
+
+# Enable UTF-8 encoding on Windows consoles
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+# Ensure parent directory is in sys.path when invoked directly as a standalone script
+_pkg_root = Path(__file__).resolve().parent.parent
+if str(_pkg_root) not in sys.path:
+    sys.path.insert(0, str(_pkg_root))
+
+try:
+    from src.database import (
+        DB_PATH,
+        get_db_connection,
+        decrypt_and_unpack,
+        db_maintenance,
+        rotate_encryption_key,
+        kv_get,
+        kv_search,
+        kv_count,
+    )
+    from src.cache import cache
+    from src.masking import mask_pii
+    from src.integrity import verify_database_integrity
+    from src.cloud_sync import cloud_sync
+except ImportError:
+    from .database import (
+        DB_PATH,
+        get_db_connection,
+        decrypt_and_unpack,
+        db_maintenance,
+        rotate_encryption_key,
+        kv_get,
+        kv_search,
+        kv_count,
+    )
+    from .cache import cache
+    from .masking import mask_pii
+    from .integrity import verify_database_integrity
+    from .cloud_sync import cloud_sync
 
 
 def cmd_keygen(args):
@@ -30,9 +80,6 @@ def cmd_keygen(args):
 
 def cmd_stats(args):
     """Display database statistics and telemetry."""
-    from .database import DB_PATH, get_db_connection
-    from .cache import cache
-
     db_file = Path(args.path) if args.path else DB_PATH
     print("\n" + "=" * 60)
     print(" DATABASE & CACHE TELEMETRY")
@@ -65,8 +112,6 @@ def cmd_stats(args):
 
 def cmd_export(args):
     """Export decrypted (and optionally sanitized) documents to a folder."""
-    from .database import get_db_connection, decrypt_and_unpack
-    from .masking import mask_pii
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -103,14 +148,16 @@ def cmd_export(args):
 
 def cmd_import(args):
     """Import a folder of JSON files into the database."""
-    from ..migrate import migrate_folder
-    folder = Path(args.folder)
+    try:
+        from migrate import migrate_folder
+    except ImportError:
+        from ..migrate import migrate_folder
+    folder = Path(args.path)
     migrate_folder(folder)
 
 
 def cmd_vacuum(args):
     """Run database maintenance and checkpointing."""
-    from .database import db_maintenance, DB_PATH
     print(f"\nRunning database maintenance on {DB_PATH}...")
     res = db_maintenance()
     print(f"Result: {res}\n")
@@ -118,9 +165,6 @@ def cmd_vacuum(args):
 
 def cmd_rotate_key(args):
     """Rotate encryption key across all database records atomically."""
-    from .database import rotate_encryption_key, _get_cipher
-    import os
-
     old_key = args.old_key or os.getenv("ENCRYPTION_KEY")
     if not old_key:
         print("Error: Old encryption key not specified. Provide --old-key or set ENCRYPTION_KEY.")
@@ -128,7 +172,6 @@ def cmd_rotate_key(args):
 
     new_key = args.new_key
     if not new_key:
-        # Generate a new key if not provided
         new_key = Fernet.generate_key().decode()
         print(f"Generated new Fernet key: {new_key}")
 
@@ -144,7 +187,6 @@ def cmd_rotate_key(args):
 
 def cmd_get(args):
     """Fetch and print a decrypted JSON document by key."""
-    from .database import kv_get
     key = args.key
     data = kv_get(key, default=None)
     if data is None:
@@ -155,8 +197,6 @@ def cmd_get(args):
 
 def cmd_verify(args):
     """Run a complete cryptographic integrity and anti-tamper audit."""
-    from .integrity import verify_database_integrity
-
     print("\n" + "=" * 60)
     print(" 🛡️ CRYPTOGRAPHIC DATABASE INTEGRITY AUDIT")
     print("=" * 60)
@@ -179,7 +219,6 @@ def cmd_verify(args):
 
 def cmd_find(args):
     """Search and list keys matching a wildcard pattern."""
-    from .database import kv_search
     pattern = args.pattern
     limit = args.limit
     keys = kv_search(pattern=pattern, limit=limit)
@@ -191,7 +230,6 @@ def cmd_find(args):
 
 def cmd_count(args):
     """Print total document count."""
-    from .database import kv_count
     pattern = args.pattern
     count = kv_count(pattern=pattern)
     if pattern:
@@ -200,29 +238,8 @@ def cmd_count(args):
         print(f"Total stored documents: {count:,}")
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        prog="encrypted-sqlite",
-        description="Encrypted SQLite JSON & Two-Tier Caching CLI Utility"
-    )
-    subparsers = parser.add_subparsers(dest="command", help="Available subcommands")
-
-    # keygen
-    subparsers.add_parser("keygen", help="Generate a new cryptographic AES-256 Fernet key")
-
-    # stats
-    subparsers.add_parser("stats", help="Display storage, telemetry, and L1 cache hit metrics")
-
-    # export
-    p_export = subparsers.add_parser("export", help="Export all decrypted documents to a folder")
-    p_export.add_argument("--out", "-o", default="./decrypted_export", help="Output directory")
-    p_export.add_argument("--sanitize", "-s", action="store_true", help="Redact/mask sensitive PII fields (GDPR/privacy)")
-    p_export.add_argument("--strategy", choices=["partial", "full", "hash"], default="partial", help="Masking strategy (default: partial)")
-    p_export.add_argument("--fields", default=None, help="Comma-separated list of custom field names to mask")
-
 def cmd_cloud_backup(args):
     """Create a live online snapshot and upload to S3/Cloudflare R2."""
-    from .cloud_sync import cloud_sync
     print("\n📦 Creating live online database snapshot...")
     res = cloud_sync.sync_to_cloud(retention_count=args.retention)
     print(f"✅ Snapshot created: {res['snapshot_file']} ({res['size_bytes']:,} bytes)")
@@ -235,7 +252,6 @@ def cmd_cloud_backup(args):
 
 def cmd_cloud_list(args):
     """List available backups in cloud bucket."""
-    from .cloud_sync import cloud_sync
     backups = cloud_sync.list_cloud_backups()
     if not backups:
         print(f"\nNo cloud backups found in bucket '{cloud_sync.bucket_name}'.")
@@ -248,7 +264,6 @@ def cmd_cloud_list(args):
 
 def cmd_cloud_restore(args):
     """Restore database from a remote cloud backup."""
-    from .cloud_sync import cloud_sync
     print(f"\n⏳ Restoring database from cloud backup: '{args.key}'...")
     success = cloud_sync.restore_from_cloud(args.key)
     if success:
@@ -268,7 +283,8 @@ def main():
     subparsers.add_parser("keygen", help="Generate a new cryptographic AES-256 Fernet key")
 
     # stats
-    subparsers.add_parser("stats", help="Display storage, telemetry, and L1 cache hit metrics")
+    p_stats = subparsers.add_parser("stats", help="Display storage, telemetry, and L1 cache hit metrics")
+    p_stats.add_argument("path", nargs="?", default=None, help="Optional database file path")
 
     # export
     p_export = subparsers.add_parser("export", help="Export all decrypted documents to a folder")

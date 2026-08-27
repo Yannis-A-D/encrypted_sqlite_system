@@ -2,12 +2,14 @@
 
 [![CI Tests](https://github.com/Yannis-A-D/encrypted_sqlite_system/actions/workflows/tests.yml/badge.svg)](https://github.com/Yannis-A-D/encrypted_sqlite_system/actions/workflows/tests.yml)
 [![PyPI Version](https://img.shields.io/pypi/v/encrypted-sqlite-system.svg)](https://pypi.org/project/encrypted-sqlite-system/)
+[![NPM Version](https://img.shields.io/npm/v/encrypted-sqlite.svg)](https://www.npmjs.com/package/encrypted-sqlite)
 [![Python Version](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
+[![NPX Run](https://img.shields.io/badge/npx-encrypted--sqlite-informational.svg)](https://www.npmjs.com/package/encrypted-sqlite)
 [![Encryption](https://img.shields.io/badge/encryption-AES--128%20Fernet-brightgreen.svg)](https://cryptography.io/)
 [![Database](https://img.shields.io/badge/storage-SQLite%20WAL-orange.svg)](https://sqlite.org/)
 [![License](https://img.shields.io/badge/license-MIT-purple.svg)](LICENSE)
 
-A high-performance, thread-safe, **AES-128 encrypted SQLite document store and Two-Tier caching engine** for Python applications, bots, and microservices.
+A high-performance, thread-safe, **AES-128 encrypted SQLite document store and Two-Tier caching engine** for Python & Node.js applications, bots, and microservices. Run instantly with **Python** or zero-install via **`npx encrypted-sqlite`**!
 
 Serves as a transparent, high-speed drop-in replacement for standard flat `.json` file storage with sub-millisecond memory caching and zero-lock concurrency.
 
@@ -400,6 +402,26 @@ cloud_sync.restore_from_cloud("backups/snapshot_20260827_214500.db")
 encrypted-sqlite cloud-backup --retention 7
 encrypted-sqlite cloud-list
 encrypted-sqlite cloud-restore backups/snapshot_20260827.db
+```
+
+---
+
+### 13. Zero-Install NPX CLI (Node.js / JS / TS Support)
+
+Run the CLI instantly from any terminal without installing global packages:
+
+```bash
+# Display live telemetry & hit ratio
+npx encrypted-sqlite stats
+
+# Run anti-tamper cryptographic integrity verification
+npx encrypted-sqlite verify
+
+# Query records matching wildcard pattern
+npx encrypted-sqlite find --pattern "user_*" --limit 20
+
+# Export & sanitize PII
+npx encrypted-sqlite export --sanitize --out ./backup_export
 ```
 
 ---

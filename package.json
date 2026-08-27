@@ -1,0 +1,39 @@
+{
+  "name": "encrypted-sqlite",
+  "version": "1.0.0",
+  "description": "High-speed AES-128 encrypted SQLite JSON storage & two-tier RAM caching CLI utility.",
+  "main": "bin/cli.js",
+  "bin": {
+    "encrypted-sqlite": "./bin/cli.js"
+  },
+  "scripts": {
+    "test": "node bin/cli.js stats"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Yannis-A-D/encrypted_sqlite_system.git"
+  },
+  "keywords": [
+    "sqlite",
+    "sqlite3",
+    "encrypted-sqlite",
+    "aes-128",
+    "fernet",
+    "lru-cache",
+    "redis",
+    "database",
+    "storage",
+    "performance",
+    "json-database",
+    "discord-bot"
+  ],
+  "author": "Yannis",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/Yannis-A-D/encrypted_sqlite_system/issues"
+  },
+  "homepage": "https://github.com/Yannis-A-D/encrypted_sqlite_system#readme",
+  "engines": {
+    "node": ">=14.0.0"
+  }
+}

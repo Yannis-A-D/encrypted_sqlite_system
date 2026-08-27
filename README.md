@@ -463,7 +463,7 @@ This project is licensed under the MIT License — see the [LICENSE](LICENSE) fi
 ---
 
 ### ⭐ Support the Project
-If you find this project useful or helpful for your own applications, please consider giving it a **Star** on GitHub — it helps others discover the project!
+If you find this project useful or helpful for your own applications, please consider giving it a **Star** on GitHub, or support development by [buying me a coffee](https://buymeacoffee.com/penguinyannis)!
 
 ---
 

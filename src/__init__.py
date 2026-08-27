@@ -11,6 +11,9 @@ from .database import (
     kv_mget,
     kv_mset,
     kv_delete,
+    kv_search,
+    kv_find,
+    kv_count,
     rotate_encryption_key,
     db_maintenance,
     bloom,
@@ -24,11 +27,15 @@ from .async_engine import (
     async_delete_json,
     async_db_maintenance,
     async_rotate_encryption_key,
+    async_search,
+    async_find,
+    async_count,
 )
 from .integrity import verify_database_integrity, compute_record_checksum
 from .adapters import BaseL1Adapter, MemoryL1Adapter, CompressedMemoryL1Adapter, RedisL1Adapter
 from .write_behind import WriteBehindEngine
 from .bloom_filter import BloomFilter
+from . import serializers
 
 __version__ = "1.0.0"
 __all__ = [
@@ -39,6 +46,9 @@ __all__ = [
     "kv_mget",
     "kv_mset",
     "kv_delete",
+    "kv_search",
+    "kv_find",
+    "kv_count",
     "rotate_encryption_key",
     "db_maintenance",
     "bloom",
@@ -53,6 +63,9 @@ __all__ = [
     "async_delete_json",
     "async_db_maintenance",
     "async_rotate_encryption_key",
+    "async_search",
+    "async_find",
+    "async_count",
     "verify_database_integrity",
     "compute_record_checksum",
     "BaseL1Adapter",
@@ -61,4 +74,5 @@ __all__ = [
     "RedisL1Adapter",
     "WriteBehindEngine",
     "BloomFilter",
+    "serializers",
 ]

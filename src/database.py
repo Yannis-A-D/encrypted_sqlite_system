@@ -222,6 +222,60 @@ def kv_delete(key: str) -> bool:
         return cur.rowcount > 0
 
 
+def kv_search(pattern: str = "*", limit: int | None = None) -> list[str]:
+    """
+    Search all keys matching a wildcard glob pattern (e.g. 'user_*', 'ticket_*.json').
+    """
+    init_db()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    if limit is not None and limit > 0:
+        cursor.execute("SELECT key FROM kv_store WHERE key GLOB ? ORDER BY updated_at DESC LIMIT ?", (pattern, limit))
+    else:
+        cursor.execute("SELECT key FROM kv_store WHERE key GLOB ? ORDER BY updated_at DESC", (pattern,))
+    return [row["key"] for row in cursor.fetchall()]
+
+
+def kv_find(
+    predicate: Any,
+    pattern: str = "*",
+    limit: int | None = None
+) -> list[dict[str, Any]]:
+    """
+    Search and filter decrypted documents matching a custom Python condition.
+    """
+    keys = kv_search(pattern=pattern)
+    if not keys:
+        return []
+
+    batch_docs = kv_mget(keys)
+    matches = []
+
+    for key, doc in batch_docs.items():
+        try:
+            if predicate(doc):
+                matches.append(doc)
+                if limit is not None and len(matches) >= limit:
+                    break
+        except Exception:
+            continue
+
+    return matches
+
+
+def kv_count(pattern: str | None = None) -> int:
+    """Return total number of stored documents, optionally matching a pattern."""
+    init_db()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    if pattern:
+        cursor.execute("SELECT COUNT(*) AS total FROM kv_store WHERE key GLOB ?", (pattern,))
+    else:
+        cursor.execute("SELECT COUNT(*) AS total FROM kv_store")
+    row = cursor.fetchone()
+    return row["total"] if row else 0
+
+
 def kv_mget(keys: list[str]) -> dict[str, Any]:
     """
     Retrieve and decrypt multiple JSON documents in a single SQL batch query

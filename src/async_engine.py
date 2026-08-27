@@ -10,7 +10,7 @@ import asyncio
 from typing import Any
 from pathlib import Path
 from .secure_json import load_json, save_json, DATA_DIR
-from .database import kv_delete, db_maintenance, rotate_encryption_key
+from .database import kv_delete, db_maintenance, rotate_encryption_key, kv_search, kv_find, kv_count
 from .cache import cache, _lock
 
 
@@ -59,6 +59,21 @@ async def async_delete_json(file_or_key: str | Path) -> bool:
         return res
 
     return await asyncio.to_thread(_sync_delete)
+
+
+async def async_search(pattern: str = "*", limit: int | None = None) -> list[str]:
+    """Asynchronously search for keys matching a wildcard pattern."""
+    return await asyncio.to_thread(kv_search, pattern, limit)
+
+
+async def async_find(predicate: Any, pattern: str = "*", limit: int | None = None) -> list[dict[str, Any]]:
+    """Asynchronously filter decrypted documents matching a condition."""
+    return await asyncio.to_thread(kv_find, predicate, pattern, limit)
+
+
+async def async_count(pattern: str | None = None) -> int:
+    """Asynchronously count documents in SQLite."""
+    return await asyncio.to_thread(kv_count, pattern)
 
 
 async def async_db_maintenance() -> dict:

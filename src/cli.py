@@ -177,6 +177,29 @@ def cmd_verify(args):
     print("=" * 60 + "\n")
 
 
+def cmd_find(args):
+    """Search and list keys matching a wildcard pattern."""
+    from .database import kv_search
+    pattern = args.pattern
+    limit = args.limit
+    keys = kv_search(pattern=pattern, limit=limit)
+    print(f"\n🔍 Found {len(keys)} matching key(s) for pattern '{pattern}':")
+    for k in keys:
+        print(f"  - {k}")
+    print()
+
+
+def cmd_count(args):
+    """Print total document count."""
+    from .database import kv_count
+    pattern = args.pattern
+    count = kv_count(pattern=pattern)
+    if pattern:
+        print(f"Total documents matching '{pattern}': {count:,}")
+    else:
+        print(f"Total stored documents: {count:,}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="encrypted-sqlite",
@@ -216,6 +239,15 @@ def main():
     p_get = subparsers.add_parser("get", help="Retrieve and print a decrypted document by key")
     p_get.add_argument("key", help="Key name (e.g. user_101.json)")
 
+    # find
+    p_find = subparsers.add_parser("find", help="Search keys matching a wildcard pattern")
+    p_find.add_argument("--pattern", "-p", default="*", help="Glob pattern (e.g. 'user_*', '*.json')")
+    p_find.add_argument("--limit", "-l", type=int, default=None, help="Maximum number of keys to return")
+
+    # count
+    p_count = subparsers.add_parser("count", help="Count total stored documents in the database")
+    p_count.add_argument("--pattern", "-p", default=None, help="Optional glob pattern filter")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -231,6 +263,8 @@ def main():
         "rotate-key": cmd_rotate_key,
         "verify": cmd_verify,
         "get": cmd_get,
+        "find": cmd_find,
+        "count": cmd_count,
     }
 
     cmd_fn = dispatch.get(args.command)

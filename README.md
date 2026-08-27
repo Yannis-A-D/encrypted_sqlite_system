@@ -17,6 +17,7 @@ Serves as a transparent, high-speed drop-in replacement for standard flat `.json
 
 * 🔒 **AES-128 Fernet Encryption at Rest**: All JSON documents and database tables are encrypted before touching physical storage.
 * ⚡ **Two-Tier (L1/L2) Caching**:
+* 🔍 **Fast Document Query & Wildcard Search**: Query encrypted documents with wildcard glob patterns (`kv_search`) or custom Python predicate filters (`kv_find`) with parallel multi-core decryption.
 * 🌊 **Asynchronous Write-Behind Batch Journaling**: Coalesces high-frequency writes in memory and flushes them to SQLite in bulk transactions (over **300,000 writes/sec**).
 * 🏎️ **Multi-Key Batch Operations & Parallel Decryption (`kv_mget` / `kv_mset`)**: Loads and saves multiple keys in a single SQL roundtrip with parallel multi-core CPU thread pool decryption.
 * 🗜️ **In-Memory RAM Compression (`CompressedMemoryL1Adapter`)**: Slashes bot RAM usage by **70%–80%** while maintaining instant lookups.
@@ -350,6 +351,29 @@ from src.cache import cache
 cache.use_compressed_memory(max_capacity=50000)
 
 cache.set("large_history.json", {"actions": ["log_event" for _ in range(500)]})
+```
+
+---
+
+### 11. Fast Document Query & Wildcard Search
+
+```python
+from src import kv_search, kv_find, kv_count
+
+# 1. Search keys matching a wildcard pattern
+ticket_keys = kv_search("ticket_*.json", limit=100)
+
+# 2. Filter decrypted documents with custom Python lambda conditions
+vip_users = kv_find(lambda doc: doc.get("level", 0) >= 50, pattern="user_*.json")
+
+# 3. Fast document count
+total_users = kv_count("user_*.json")
+```
+
+```bash
+# Or search from the command line:
+encrypted-sqlite find --pattern "user_*" --limit 50
+encrypted-sqlite count --pattern "ticket_*"
 ```
 
 ---

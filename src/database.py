@@ -166,6 +166,21 @@ def init_db():
         except Exception:
             pass
 
+        # Check if auto key rotation is enabled in env
+        auto_rotate = os.getenv("AUTO_KEY_ROTATION", "false").lower() in ("true", "1", "yes")
+        if auto_rotate:
+            try:
+                from .key_rotation import rotator
+                interval_days_str = os.getenv("KEY_ROTATION_INTERVAL_DAYS", "90")
+                try:
+                    interval_days = float(interval_days_str)
+                except ValueError:
+                    interval_days = 90.0
+                rotator.rotation_interval = interval_days * 86400.0
+                rotator.start()
+            except Exception as e:
+                print(f"[Database] Failed to start auto-key rotation: {e}")
+
         _db_initialized = True
 
 

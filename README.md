@@ -426,6 +426,27 @@ npx encrypted-sqlite export --sanitize --out ./backup_export
 
 ---
 
+### 14. Automated Background Key Rotation
+
+To satisfy enterprise security compliance, you can enable automated background key rotation. A background daemon thread periodically checks the age of the active encryption key and re-encrypts all database records with a freshly generated key without service downtime.
+
+Configure via environment variables:
+```bash
+# Enable background rotation daemon (disabled by default)
+export AUTO_KEY_ROTATION=True
+
+# Duration (in days) before a key is rotated (default: 90 days)
+export KEY_ROTATION_INTERVAL_DAYS=30
+```
+
+When rotation is triggered:
+1. A new Fernet key is generated.
+2. Every database row is read, decrypted with the old key, encrypted with the new key, and committed in a single atomic transaction.
+3. The new key is written to `secret.key` and all local `.env` and `bot.env` configuration files are automatically updated to prevent credentials desynchronization.
+4. The active in-memory cipher is hot-swapped seamlessly.
+
+---
+
 ## 📁 Project Structure
 
 ```

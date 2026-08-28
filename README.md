@@ -1,13 +1,11 @@
 # 🔐 Encrypted SQLite JSON & Two-Tier Caching Engine
 
 [![CI Tests](https://github.com/Yannis-A-D/encrypted_sqlite_system/actions/workflows/tests.yml/badge.svg)](https://github.com/Yannis-A-D/encrypted_sqlite_system/actions/workflows/tests.yml)
-[![PyPI Version](https://img.shields.io/pypi/v/encrypted-sqlite-system.svg)](https://pypi.org/project/encrypted-sqlite-system/)
-[![NPM Version](https://img.shields.io/npm/v/encrypted-sqlite.svg)](https://www.npmjs.com/package/encrypted-sqlite)
 [![Python Version](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
-[![NPX Run](https://img.shields.io/badge/npx-encrypted--sqlite-informational.svg)](https://www.npmjs.com/package/encrypted-sqlite)
 [![Encryption](https://img.shields.io/badge/encryption-AES--256--GCM-brightgreen.svg)](https://cryptography.io/)
 [![Database](https://img.shields.io/badge/storage-SQLite%20WAL-orange.svg)](https://sqlite.org/)
 [![License](https://img.shields.io/badge/license-MIT-purple.svg)](LICENSE)
+
 
 A high-performance, thread-safe, **AES-256-GCM encrypted SQLite document store and Two-Tier caching engine** for Python & Node.js applications, bots, and microservices. Run instantly with **Python** or zero-install via **`npx encrypted-sqlite`**!
 

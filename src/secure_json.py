@@ -13,7 +13,13 @@ import json
 from pathlib import Path
 from typing import Any
 from cryptography.exceptions import InvalidTag
-from .database import _get_cipher, DATA_DIR
+from cryptography.fernet import InvalidToken
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.fernet import Fernet
+from .database import (
+    _get_cipher, _get_ciphers, get_active_algorithm, DATA_DIR,
+    _PREFIX_GCM, _PREFIX_FERNET
+)
 from .cache import cache
 
 
@@ -49,19 +55,41 @@ def load_json(path: str | Path, default: Any = None) -> Any:
     if not raw:
         return default
 
-    cipher = _get_cipher()
-
     # Try decryption first
     try:
-        if len(raw) < 12:
-            raise ValueError("Ciphertext is too short (missing IV/nonce).")
-        nonce = raw[:12]
-        ciphertext = raw[12:]
-        plaintext = cipher.decrypt(nonce, ciphertext, associated_data=None)
-        data = json.loads(plaintext)
+        decrypted = None
+        if raw.startswith(_PREFIX_GCM):
+            cipher_gcm, _ = _get_ciphers()
+            actual_blob = raw[5:]
+            if len(actual_blob) < 12:
+                raise ValueError("Missing GCM nonce.")
+            nonce = actual_blob[:12]
+            ciphertext = actual_blob[12:]
+            decrypted = cipher_gcm.decrypt(nonce, ciphertext, associated_data=None)
+        elif raw.startswith(_PREFIX_FERNET):
+            _, cipher_fernet = _get_ciphers()
+            actual_blob = raw[5:]
+            decrypted = cipher_fernet.decrypt(actual_blob)
+        elif raw[0] == 0x80 or raw.startswith(b"gAAAA"):
+            # Legacy unprefixed Fernet token
+            _, cipher_fernet = _get_ciphers()
+            decrypted = cipher_fernet.decrypt(raw)
+        else:
+            # Fallback to active cipher
+            cipher_active = _get_cipher()
+            if isinstance(cipher_active, AESGCM):
+                if len(raw) < 12:
+                    raise ValueError("Missing GCM nonce.")
+                nonce = raw[:12]
+                ciphertext = raw[12:]
+                decrypted = cipher_active.decrypt(nonce, ciphertext, associated_data=None)
+            else:
+                decrypted = cipher_active.decrypt(raw)
+
+        data = json.loads(decrypted)
         cache.set_l1_only(key_name, data)
         return data
-    except (InvalidTag, Exception):
+    except (InvalidTag, InvalidToken, Exception):
         pass
 
     # Fall back to plain-text JSON (legacy files)
@@ -92,10 +120,18 @@ def save_json(path: str | Path, data: Any, indent: int = 2):
 
     # 2. Atomic write to encrypted disk file for backup safety
     plaintext = json.dumps(data, indent=indent, ensure_ascii=False).encode("utf-8")
-    cipher = _get_cipher()
-    nonce = os.urandom(12)
-    ciphertext = cipher.encrypt(nonce, plaintext, associated_data=None)
-    payload = nonce + ciphertext
+    
+    algo = get_active_algorithm()
+    if algo == "AES-128-FERNET":
+        _, cipher_fernet = _get_ciphers()
+        ciphertext = cipher_fernet.encrypt(plaintext)
+        payload = _PREFIX_FERNET + ciphertext
+    else:
+        # Default to AES-256-GCM
+        cipher_gcm, _ = _get_ciphers()
+        nonce = os.urandom(12)
+        ciphertext = cipher_gcm.encrypt(nonce, plaintext, associated_data=None)
+        payload = _PREFIX_GCM + nonce + ciphertext
 
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_bytes(payload)

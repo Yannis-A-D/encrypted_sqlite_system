@@ -426,12 +426,17 @@ npx encrypted-sqlite export --sanitize --out ./backup_export
 
 ---
 
-### 14. Automated Background Key Rotation
+### 14. Dual Encryption & Automated Background Key Rotation
 
-To satisfy enterprise security compliance, you can enable automated background key rotation. A background daemon thread periodically checks the age of the active encryption key and re-encrypts all database records with a freshly generated key without service downtime.
+The engine supports **both AES-256-GCM (default) and AES-128-Fernet** encryption. You can configure which algorithm is active for newly written data via environment variables.
 
-Configure via environment variables:
+Additionally, the database features **automatic format detection** on the fly, meaning it can read and decrypt both AES-256-GCM and AES-128-Fernet encrypted records simultaneously in the same database or backup snapshot without manual configuration.
+
+#### Configuration Environment Variables:
 ```bash
+# Set active encryption algorithm: "AES-256-GCM" or "AES-128-FERNET" (default: "AES-256-GCM")
+export ENCRYPTION_ALGORITHM=AES-256-GCM
+
 # Enable background rotation daemon (disabled by default)
 export AUTO_KEY_ROTATION=True
 
@@ -440,10 +445,10 @@ export KEY_ROTATION_INTERVAL_DAYS=30
 ```
 
 When rotation is triggered:
-1. A new Fernet key is generated.
-2. Every database row is read, decrypted with the old key, encrypted with the new key, and committed in a single atomic transaction.
-3. The new key is written to `secret.key` and all local `.env` and `bot.env` configuration files are automatically updated to prevent credentials desynchronization.
-4. The active in-memory cipher is hot-swapped seamlessly.
+1. A new secure 256-bit encryption key is generated.
+2. Every database row is read, decrypted using its automatically detected format, re-encrypted with the new key in the configured `ENCRYPTION_ALGORITHM` format, and committed in a single atomic transaction. This allows you to migrate formats (e.g., converting a legacy Fernet database to AES-256-GCM) seamlessly without service downtime.
+3. The new key is written to `secret.key` and all local `.env` and `bot.env` configuration files are automatically updated.
+4. The active in-memory ciphers are hot-swapped seamlessly.
 
 ---
 

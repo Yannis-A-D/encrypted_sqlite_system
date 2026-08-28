@@ -18,6 +18,7 @@ import base64
 from pathlib import Path
 from typing import Any
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.fernet import Fernet, InvalidToken
 from cryptography.exceptions import InvalidTag
 
 # Thread-local storage for SQLite connections
@@ -30,17 +31,26 @@ ROOT_DIR = Path(__file__).parent.parent
 DATA_DIR = ROOT_DIR / "data"
 DB_PATH = DATA_DIR / "app_database.db"
 
-# Encryption Key setup
-_cipher: AESGCM | None = None
+# Encryption Key setup and prefixes
+_cipher_aesgcm: AESGCM | None = None
+_cipher_fernet: Fernet | None = None
+
+_PREFIX_GCM = b"G256:"
+_PREFIX_FERNET = b"F128:"
 _MAGIC_COMPRESSED = b"ZL1:"
 _MAGIC_RAW = b"RW1:"
 
 
-def _get_cipher() -> AESGCM:
-    """Retrieve or generate the global AES-256-GCM cipher instance."""
-    global _cipher
-    if _cipher is not None:
-        return _cipher
+def get_active_algorithm() -> str:
+    """Get the currently configured encryption algorithm."""
+    return os.getenv("ENCRYPTION_ALGORITHM", "AES-256-GCM").upper()
+
+
+def _get_ciphers() -> tuple[AESGCM, Fernet]:
+    """Retrieve or generate both AESGCM and Fernet cipher instances."""
+    global _cipher_aesgcm, _cipher_fernet
+    if _cipher_aesgcm is not None and _cipher_fernet is not None:
+        return _cipher_aesgcm, _cipher_fernet
 
     raw_key = os.getenv("ENCRYPTION_KEY")
     if not raw_key:
@@ -58,15 +68,28 @@ def _get_cipher() -> AESGCM:
     if isinstance(raw_key, str):
         raw_key = raw_key.encode("utf-8")
 
-    # Base64 decode to get the raw 32-byte key material (256-bit)
+    # Initialize Fernet (expects base64 key)
+    _cipher_fernet = Fernet(raw_key)
+
+    # Initialize AESGCM (expects raw 32-byte key material)
     key_material = base64.urlsafe_b64decode(raw_key)
-    _cipher = AESGCM(key_material)
-    return _cipher
+    _cipher_aesgcm = AESGCM(key_material)
+
+    return _cipher_aesgcm, _cipher_fernet
+
+
+def _get_cipher() -> Any:
+    """Retrieve the global active cipher instance based on current algorithm (for backward compatibility)."""
+    aesgcm_cipher, fernet_cipher = _get_ciphers()
+    algo = get_active_algorithm()
+    if algo == "AES-128-FERNET":
+        return fernet_cipher
+    return aesgcm_cipher
 
 
 def set_cipher_key(new_key: str | bytes):
-    """Update active in-memory cipher key."""
-    global _cipher
+    """Update active in-memory cipher keys (both AESGCM and Fernet)."""
+    global _cipher_aesgcm, _cipher_fernet
     if isinstance(new_key, str):
         new_key = new_key.encode("utf-8")
     
@@ -74,13 +97,15 @@ def set_cipher_key(new_key: str | bytes):
     try:
         key_material = base64.urlsafe_b64decode(new_key)
         if len(key_material) == 32:
-            _cipher = AESGCM(key_material)
+            _cipher_aesgcm = AESGCM(key_material)
+            _cipher_fernet = Fernet(new_key)
             return
     except Exception:
         pass
 
     if len(new_key) == 32:
-        _cipher = AESGCM(new_key)
+        _cipher_aesgcm = AESGCM(new_key)
+        _cipher_fernet = Fernet(base64.urlsafe_b64encode(new_key))
     else:
         raise ValueError("Key must be 32 bytes or 44-character URL-safe Base64 encoded key.")
 
@@ -88,11 +113,8 @@ def set_cipher_key(new_key: str | bytes):
 from . import serializers
 
 
-def pack_and_encrypt(data: Any, cipher: AESGCM | None = None) -> bytes:
-    """Serialize with zero-copy serializer, compress with zlib, and encrypt with AES-256-GCM."""
-    if cipher is None:
-        cipher = _get_cipher()
-
+def pack_and_encrypt(data: Any, cipher: Any = None) -> bytes:
+    """Serialize, compress, encrypt, and prefix with algorithm identifier."""
     raw_bytes = serializers.dumps(data)
 
     # Compress if payload is larger than 128 bytes
@@ -101,34 +123,102 @@ def pack_and_encrypt(data: Any, cipher: AESGCM | None = None) -> bytes:
     else:
         payload = _MAGIC_RAW + raw_bytes
 
-    # Generate random 12-byte nonce (IV)
-    nonce = os.urandom(12)
-    ciphertext = cipher.encrypt(nonce, payload, associated_data=None)
-    
-    # Return nonce + ciphertext together
-    return nonce + ciphertext
+    # Handle explicit custom cipher instance
+    if cipher is not None:
+        if isinstance(cipher, AESGCM):
+            nonce = os.urandom(12)
+            ciphertext = cipher.encrypt(nonce, payload, associated_data=None)
+            return _PREFIX_GCM + nonce + ciphertext
+        elif isinstance(cipher, Fernet):
+            ciphertext = cipher.encrypt(payload)
+            return _PREFIX_FERNET + ciphertext
+        else:
+            raise TypeError("Cipher must be an instance of AESGCM or Fernet.")
+
+    # Otherwise, encrypt using the active algorithm
+    aesgcm_cipher, fernet_cipher = _get_ciphers()
+    algo = get_active_algorithm()
+
+    if algo == "AES-128-FERNET":
+        ciphertext = fernet_cipher.encrypt(payload)
+        return _PREFIX_FERNET + ciphertext
+    else:
+        # Default to AES-256-GCM
+        nonce = os.urandom(12)
+        ciphertext = aesgcm_cipher.encrypt(nonce, payload, associated_data=None)
+        return _PREFIX_GCM + nonce + ciphertext
 
 
-def decrypt_and_unpack(encrypted_blob: bytes, cipher: AESGCM | None = None) -> Any:
-    """Decrypt, decompress, and deserialize payload encrypted with AES-256-GCM."""
-    if cipher is None:
-        cipher = _get_cipher()
+def decrypt_and_unpack(encrypted_blob: bytes, cipher: Any = None) -> Any:
+    """Decrypt, decompress, and deserialize payload with automatic algorithm detection."""
+    if len(encrypted_blob) < 5:
+        raise ValueError("Encrypted payload too short.")
 
-    # Extract 12-byte nonce
-    if len(encrypted_blob) < 12:
-        raise ValueError("Ciphertext is too short (missing IV/nonce).")
-    
-    nonce = encrypted_blob[:12]
-    ciphertext = encrypted_blob[12:]
+    decrypted = None
 
-    decrypted = cipher.decrypt(nonce, ciphertext, associated_data=None)
+    # Handle explicit custom cipher instance
+    if cipher is not None:
+        actual_blob = encrypted_blob
+        if encrypted_blob.startswith(_PREFIX_GCM) or encrypted_blob.startswith(_PREFIX_FERNET):
+            actual_blob = encrypted_blob[5:]
 
+        if isinstance(cipher, AESGCM):
+            if len(actual_blob) < 12:
+                raise ValueError("Payload missing GCM nonce.")
+            nonce = actual_blob[:12]
+            ciphertext = actual_blob[12:]
+            decrypted = cipher.decrypt(nonce, ciphertext, associated_data=None)
+        elif isinstance(cipher, Fernet):
+            decrypted = cipher.decrypt(actual_blob)
+        else:
+            raise TypeError("Cipher must be an instance of AESGCM or Fernet.")
+    else:
+        # Auto-detect using prefixes
+        aesgcm_cipher, fernet_cipher = _get_ciphers()
+
+        if encrypted_blob.startswith(_PREFIX_GCM):
+            actual_blob = encrypted_blob[5:]
+            if len(actual_blob) < 12:
+                raise ValueError("Payload missing GCM nonce.")
+            nonce = actual_blob[:12]
+            ciphertext = actual_blob[12:]
+            decrypted = aesgcm_cipher.decrypt(nonce, ciphertext, associated_data=None)
+        elif encrypted_blob.startswith(_PREFIX_FERNET):
+            actual_blob = encrypted_blob[5:]
+            decrypted = fernet_cipher.decrypt(actual_blob)
+        elif encrypted_blob[0] == 0x80 or encrypted_blob.startswith(b"gAAAA"):
+            # Legacy unprefixed Fernet token fallback
+            try:
+                decrypted = fernet_cipher.decrypt(encrypted_blob)
+            except Exception:
+                # If decrypt failed, fallback to default active algorithm
+                algo = get_active_algorithm()
+                if algo == "AES-128-FERNET":
+                    decrypted = fernet_cipher.decrypt(encrypted_blob)
+                else:
+                    if len(encrypted_blob) < 12:
+                        raise ValueError("Payload missing GCM nonce.")
+                    nonce = encrypted_blob[:12]
+                    ciphertext = encrypted_blob[12:]
+                    decrypted = aesgcm_cipher.decrypt(nonce, ciphertext, associated_data=None)
+        else:
+            # Fallback to default algorithm if no matching prefix
+            algo = get_active_algorithm()
+            if algo == "AES-128-FERNET":
+                decrypted = fernet_cipher.decrypt(encrypted_blob)
+            else:
+                if len(encrypted_blob) < 12:
+                    raise ValueError("Payload missing GCM nonce.")
+                nonce = encrypted_blob[:12]
+                ciphertext = encrypted_blob[12:]
+                decrypted = aesgcm_cipher.decrypt(nonce, ciphertext, associated_data=None)
+
+    # Decompress and deserialize
     if decrypted.startswith(_MAGIC_COMPRESSED):
         raw_bytes = zlib.decompress(decrypted[len(_MAGIC_COMPRESSED):])
     elif decrypted.startswith(_MAGIC_RAW):
         raw_bytes = decrypted[len(_MAGIC_RAW):]
     else:
-        # Legacy uncompressed data
         raw_bytes = decrypted
 
     return serializers.loads(raw_bytes)
@@ -403,23 +493,31 @@ def rotate_encryption_key(old_key: str | bytes, new_key: str | bytes) -> dict:
     if isinstance(new_key, str):
         new_key = new_key.encode("utf-8")
 
-    # Decode old and new base64 keys to raw key material
+    # Decode base64 strings to get raw key materials
     try:
         old_key_decoded = base64.urlsafe_b64decode(old_key)
         if len(old_key_decoded) == 32:
-            old_key = old_key_decoded
+            old_key_raw = old_key_decoded
+        else:
+            old_key_raw = old_key
     except Exception:
-        pass
+        old_key_raw = old_key
 
     try:
         new_key_decoded = base64.urlsafe_b64decode(new_key)
         if len(new_key_decoded) == 32:
-            new_key = new_key_decoded
+            new_key_raw = new_key_decoded
+        else:
+            new_key_raw = new_key
     except Exception:
-        pass
+        new_key_raw = new_key
 
-    old_cipher = AESGCM(old_key)
-    new_cipher = AESGCM(new_key)
+    # Initialize ciphers for both old and new keys
+    old_aesgcm = AESGCM(old_key_raw)
+    old_fernet = Fernet(base64.urlsafe_b64encode(old_key_raw) if len(old_key_raw) == 32 else old_key)
+    
+    new_aesgcm = AESGCM(new_key_raw)
+    new_fernet = Fernet(base64.urlsafe_b64encode(new_key_raw) if len(new_key_raw) == 32 else new_key)
 
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -432,12 +530,27 @@ def rotate_encryption_key(old_key: str | bytes, new_key: str | bytes) -> dict:
         old_blob = row["value"]
         ts = row["updated_at"]
         try:
-            # Decrypt with old key
-            data = decrypt_and_unpack(old_blob, cipher=old_cipher)
-            # Encrypt with new key
-            new_blob = pack_and_encrypt(data, cipher=new_cipher)
+            # Decrypt: auto-detect prefix/type and decrypt with the correct cipher
+            if old_blob.startswith(_PREFIX_GCM):
+                data = decrypt_and_unpack(old_blob, cipher=old_aesgcm)
+            elif old_blob.startswith(_PREFIX_FERNET) or old_blob.startswith(b"gAAAA") or (len(old_blob) > 0 and old_blob[0] == 0x80):
+                data = decrypt_and_unpack(old_blob, cipher=old_fernet)
+            else:
+                # Try GCM, then Fernet
+                try:
+                    data = decrypt_and_unpack(old_blob, cipher=old_aesgcm)
+                except Exception:
+                    data = decrypt_and_unpack(old_blob, cipher=old_fernet)
+
+            # Encrypt with new key using active algorithm
+            algo = get_active_algorithm()
+            if algo == "AES-128-FERNET":
+                new_blob = pack_and_encrypt(data, cipher=new_fernet)
+            else:
+                new_blob = pack_and_encrypt(data, cipher=new_aesgcm)
+
             re_encrypted_records.append((key, new_blob, ts))
-        except (InvalidTag, Exception):
+        except Exception:
             continue
 
     # Atomic write of all rotated records
@@ -445,7 +558,7 @@ def rotate_encryption_key(old_key: str | bytes, new_key: str | bytes) -> dict:
         for key, new_blob, ts in re_encrypted_records:
             conn.execute("UPDATE kv_store SET value = ?, updated_at = ? WHERE key = ?", (new_blob, ts, key))
 
-    # Update active in-memory cipher
+    # Update active in-memory cipher keys
     set_cipher_key(new_key)
 
     return {

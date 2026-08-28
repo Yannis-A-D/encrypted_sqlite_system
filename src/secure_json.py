@@ -8,10 +8,11 @@ Features:
 - Backwards compatible with legacy unencrypted JSON files.
 """
 
+import os
 import json
 from pathlib import Path
 from typing import Any
-from cryptography.fernet import InvalidToken
+from cryptography.exceptions import InvalidTag
 from .database import _get_cipher, DATA_DIR
 from .cache import cache
 
@@ -52,11 +53,15 @@ def load_json(path: str | Path, default: Any = None) -> Any:
 
     # Try decryption first
     try:
-        plaintext = cipher.decrypt(raw)
+        if len(raw) < 12:
+            raise ValueError("Ciphertext is too short (missing IV/nonce).")
+        nonce = raw[:12]
+        ciphertext = raw[12:]
+        plaintext = cipher.decrypt(nonce, ciphertext, associated_data=None)
         data = json.loads(plaintext)
         cache.set_l1_only(key_name, data)
         return data
-    except (InvalidToken, Exception):
+    except (InvalidTag, Exception):
         pass
 
     # Fall back to plain-text JSON (legacy files)
@@ -88,8 +93,10 @@ def save_json(path: str | Path, data: Any, indent: int = 2):
     # 2. Atomic write to encrypted disk file for backup safety
     plaintext = json.dumps(data, indent=indent, ensure_ascii=False).encode("utf-8")
     cipher = _get_cipher()
-    ciphertext = cipher.encrypt(plaintext)
+    nonce = os.urandom(12)
+    ciphertext = cipher.encrypt(nonce, plaintext, associated_data=None)
+    payload = nonce + ciphertext
 
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_bytes(ciphertext)
+    tmp.write_bytes(payload)
     tmp.replace(path)

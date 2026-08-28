@@ -30,7 +30,7 @@ def test_kv_encryption_at_rest():
 
     # Plaintext must NOT appear in raw database bytes
     assert secret_text.encode("utf-8") not in raw_blob
-    assert raw_blob.startswith(b"gAAAAA")  # Fernet AES token prefix
+    assert len(raw_blob) > 12  # AES-256-GCM nonce (12 bytes) + payload
 
 
 def test_kv_delete():

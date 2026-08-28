@@ -14,9 +14,11 @@ import json
 import zlib
 import sqlite3
 import threading
+import base64
 from pathlib import Path
 from typing import Any
-from cryptography.fernet import Fernet, InvalidToken
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.exceptions import InvalidTag
 
 # Thread-local storage for SQLite connections
 _local = threading.local()
@@ -29,13 +31,13 @@ DATA_DIR = ROOT_DIR / "data"
 DB_PATH = DATA_DIR / "app_database.db"
 
 # Encryption Key setup
-_cipher: Fernet | None = None
+_cipher: AESGCM | None = None
 _MAGIC_COMPRESSED = b"ZL1:"
 _MAGIC_RAW = b"RW1:"
 
 
-def _get_cipher() -> Fernet:
-    """Retrieve or generate the global Fernet cipher instance."""
+def _get_cipher() -> AESGCM:
+    """Retrieve or generate the global AES-256-GCM cipher instance."""
     global _cipher
     if _cipher is not None:
         return _cipher
@@ -46,7 +48,9 @@ def _get_cipher() -> Fernet:
         if key_file.exists():
             raw_key = key_file.read_text().strip()
         else:
-            new_key = Fernet.generate_key().decode()
+            # Generate a 256-bit key and base64-encode it for file storage compatibility
+            raw_key_bytes = AESGCM.generate_key(bit_length=256)
+            new_key = base64.urlsafe_b64encode(raw_key_bytes).decode("utf-8")
             key_file.write_text(new_key)
             raw_key = new_key
             print(f"[Database] Generated new encryption key and saved to {key_file.name}")
@@ -54,7 +58,9 @@ def _get_cipher() -> Fernet:
     if isinstance(raw_key, str):
         raw_key = raw_key.encode("utf-8")
 
-    _cipher = Fernet(raw_key)
+    # Base64 decode to get the raw 32-byte key material (256-bit)
+    key_material = base64.urlsafe_b64decode(raw_key)
+    _cipher = AESGCM(key_material)
     return _cipher
 
 
@@ -63,14 +69,27 @@ def set_cipher_key(new_key: str | bytes):
     global _cipher
     if isinstance(new_key, str):
         new_key = new_key.encode("utf-8")
-    _cipher = Fernet(new_key)
+    
+    # Try decoding if it is a base64 string
+    try:
+        key_material = base64.urlsafe_b64decode(new_key)
+        if len(key_material) == 32:
+            _cipher = AESGCM(key_material)
+            return
+    except Exception:
+        pass
+
+    if len(new_key) == 32:
+        _cipher = AESGCM(new_key)
+    else:
+        raise ValueError("Key must be 32 bytes or 44-character URL-safe Base64 encoded key.")
 
 
 from . import serializers
 
 
-def pack_and_encrypt(data: Any, cipher: Fernet | None = None) -> bytes:
-    """Serialize with zero-copy serializer, compress with zlib, and encrypt."""
+def pack_and_encrypt(data: Any, cipher: AESGCM | None = None) -> bytes:
+    """Serialize with zero-copy serializer, compress with zlib, and encrypt with AES-256-GCM."""
     if cipher is None:
         cipher = _get_cipher()
 
@@ -82,15 +101,27 @@ def pack_and_encrypt(data: Any, cipher: Fernet | None = None) -> bytes:
     else:
         payload = _MAGIC_RAW + raw_bytes
 
-    return cipher.encrypt(payload)
+    # Generate random 12-byte nonce (IV)
+    nonce = os.urandom(12)
+    ciphertext = cipher.encrypt(nonce, payload, associated_data=None)
+    
+    # Return nonce + ciphertext together
+    return nonce + ciphertext
 
 
-def decrypt_and_unpack(encrypted_blob: bytes, cipher: Fernet | None = None) -> Any:
-    """Decrypt, decompress, and deserialize payload."""
+def decrypt_and_unpack(encrypted_blob: bytes, cipher: AESGCM | None = None) -> Any:
+    """Decrypt, decompress, and deserialize payload encrypted with AES-256-GCM."""
     if cipher is None:
         cipher = _get_cipher()
 
-    decrypted = cipher.decrypt(encrypted_blob)
+    # Extract 12-byte nonce
+    if len(encrypted_blob) < 12:
+        raise ValueError("Ciphertext is too short (missing IV/nonce).")
+    
+    nonce = encrypted_blob[:12]
+    ciphertext = encrypted_blob[12:]
+
+    decrypted = cipher.decrypt(nonce, ciphertext, associated_data=None)
 
     if decrypted.startswith(_MAGIC_COMPRESSED):
         raw_bytes = zlib.decompress(decrypted[len(_MAGIC_COMPRESSED):])
@@ -372,8 +403,23 @@ def rotate_encryption_key(old_key: str | bytes, new_key: str | bytes) -> dict:
     if isinstance(new_key, str):
         new_key = new_key.encode("utf-8")
 
-    old_cipher = Fernet(old_key)
-    new_cipher = Fernet(new_key)
+    # Decode old and new base64 keys to raw key material
+    try:
+        old_key_decoded = base64.urlsafe_b64decode(old_key)
+        if len(old_key_decoded) == 32:
+            old_key = old_key_decoded
+    except Exception:
+        pass
+
+    try:
+        new_key_decoded = base64.urlsafe_b64decode(new_key)
+        if len(new_key_decoded) == 32:
+            new_key = new_key_decoded
+    except Exception:
+        pass
+
+    old_cipher = AESGCM(old_key)
+    new_cipher = AESGCM(new_key)
 
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -391,7 +437,7 @@ def rotate_encryption_key(old_key: str | bytes, new_key: str | bytes) -> dict:
             # Encrypt with new key
             new_blob = pack_and_encrypt(data, cipher=new_cipher)
             re_encrypted_records.append((key, new_blob, ts))
-        except (InvalidToken, Exception):
+        except (InvalidTag, Exception):
             continue
 
     # Atomic write of all rotated records

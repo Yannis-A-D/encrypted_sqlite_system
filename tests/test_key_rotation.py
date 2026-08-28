@@ -1,8 +1,9 @@
 import os
 import time
 import unittest
+import base64
 from pathlib import Path
-from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from src.database import kv_set, kv_get, ROOT_DIR, set_cipher_key, _get_cipher
 from src.key_rotation import BackgroundKeyRotator
 
@@ -15,7 +16,8 @@ class TestKeyRotation(unittest.TestCase):
             self.backup_key = self.key_file.read_text().strip()
         
         # Write initial key
-        self.initial_key = Fernet.generate_key().decode("utf-8")
+        raw_key_bytes = AESGCM.generate_key(bit_length=256)
+        self.initial_key = base64.urlsafe_b64encode(raw_key_bytes).decode("utf-8")
         self.key_file.write_text(self.initial_key)
         set_cipher_key(self.initial_key)
 

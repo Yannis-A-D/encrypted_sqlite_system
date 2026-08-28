@@ -5,11 +5,11 @@
 [![NPM Version](https://img.shields.io/npm/v/encrypted-sqlite.svg)](https://www.npmjs.com/package/encrypted-sqlite)
 [![Python Version](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![NPX Run](https://img.shields.io/badge/npx-encrypted--sqlite-informational.svg)](https://www.npmjs.com/package/encrypted-sqlite)
-[![Encryption](https://img.shields.io/badge/encryption-AES--128%20Fernet-brightgreen.svg)](https://cryptography.io/)
+[![Encryption](https://img.shields.io/badge/encryption-AES--256--GCM-brightgreen.svg)](https://cryptography.io/)
 [![Database](https://img.shields.io/badge/storage-SQLite%20WAL-orange.svg)](https://sqlite.org/)
 [![License](https://img.shields.io/badge/license-MIT-purple.svg)](LICENSE)
 
-A high-performance, thread-safe, **AES-128 encrypted SQLite document store and Two-Tier caching engine** for Python & Node.js applications, bots, and microservices. Run instantly with **Python** or zero-install via **`npx encrypted-sqlite`**!
+A high-performance, thread-safe, **AES-256-GCM encrypted SQLite document store and Two-Tier caching engine** for Python & Node.js applications, bots, and microservices. Run instantly with **Python** or zero-install via **`npx encrypted-sqlite`**!
 
 Serves as a transparent, high-speed drop-in replacement for standard flat `.json` file storage with sub-millisecond memory caching and zero-lock concurrency.
 
@@ -17,7 +17,7 @@ Serves as a transparent, high-speed drop-in replacement for standard flat `.json
 
 ## 🌟 Key Features
 
-* 🔒 **AES-128 Fernet Encryption at Rest**: All JSON documents and database tables are encrypted before touching physical storage.
+* 🔒 **AES-256-GCM Authenticated Encryption at Rest**: All JSON documents and database tables are encrypted with Galois/Counter Mode (AEAD) before touching physical storage.
 * ⚡ **Two-Tier (L1/L2) Caching**:
 * ☁️ **Encrypted Cloud Disaster Recovery Sync**: Non-blocking live online database backups streamed to **Cloudflare R2**, **AWS S3**, **Backblaze B2**, or **MinIO** with automated retention pruning.
 * 🔍 **Fast Document Query & Wildcard Search**: Query encrypted documents with wildcard glob patterns (`kv_search`) or custom Python predicate filters (`kv_find`) with parallel multi-core decryption.
@@ -25,7 +25,7 @@ Serves as a transparent, high-speed drop-in replacement for standard flat `.json
 * 🏎️ **Multi-Key Batch Operations & Parallel Decryption (`kv_mget` / `kv_mset`)**: Loads and saves multiple keys in a single SQL roundtrip with parallel multi-core CPU thread pool decryption.
 * 🗜️ **In-Memory RAM Compression (`CompressedMemoryL1Adapter`)**: Slashes bot RAM usage by **70%–80%** while maintaining instant lookups.
 * ⚡ **Pluggable Distributed L1 Cache (Memory / Redis)**: Seamlessly switch between local LRU in-memory RAM cache (`<0.01ms`) and shared distributed Redis cache for multi-server clusters.
-* 🛡️ **Cryptographic Integrity & Anti-Tamper Audit (`verify`)**: HMAC-SHA256 authenticated verification detecting bit-rot, corruption, or offline tampering.
+* 🛡️ **Cryptographic Integrity & Anti-Tamper Audit (`verify`)**: GCM authenticated decryption detecting bit-rot, corruption, or offline tampering.
 * ⚡ **Native Asynchronous API (`async_load_json` / `async_save_json`)**: Complete non-blocking `async`/`await` support for Discord.py, FastAPI, AIOHTTP, and asyncio event loops.
 * 🗜️ **Adaptive Zlib Compression**: Automatically shrinks large JSON documents by **75% to 90%** before encryption.
 * 🛡️ **Field-Level PII Auto-Masking & GDPR Redaction**: Recursively masks or pseudonymizes sensitive keys (emails, IPs, passwords, tokens) with partial, full, or SHA-256 hash strategies.
@@ -70,7 +70,7 @@ Write-Behind Batching(Write)|####################################| 322,580 ops/s
           │ (On L1 Miss or Write)
           ▼
  ┌────────────────────────────────────────┐
- │ Tier 2: L2 Encrypted SQLite Database   │ <── 100% Encrypted at Rest (AES-128)
+ │ Tier 2: L2 Encrypted SQLite Database   │ <── 100% Encrypted at Rest (AES-256-GCM)
  └──────────────────┬─────────────────────┘
                     │ (Optional Fallback)
                     ▼
@@ -87,7 +87,7 @@ sequenceDiagram
     actor App as Python Application
     participant L1 as Tier 1: L1 RAM (LRU)
     participant L2 as Tier 2: L2 SQLite (WAL)
-    participant Cipher as AES-128 Cipher
+    participant Cipher as AES-256-GCM Cipher
 
     App->>L1: load_json("user_101.json")
     alt L1 Cache Hit (<0.01ms)
@@ -108,7 +108,7 @@ sequenceDiagram
     autonumber
     actor App as Python Application
     participant L1 as Tier 1: L1 RAM (LRU)
-    participant Cipher as AES-128 Cipher
+    participant Cipher as AES-256-GCM Cipher
     participant L2 as Tier 2: L2 SQLite (WAL)
     participant Disk as Encrypted Disk File
 

@@ -21,6 +21,10 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.fernet import Fernet, InvalidToken
 from cryptography.exceptions import InvalidTag
 
+class ConcurrentModificationError(Exception):
+    """Raised when a concurrent write occurs and version numbers do not match."""
+    pass
+
 # Thread-local storage for SQLite connections
 _local = threading.local()
 _db_initialized = False
@@ -274,9 +278,20 @@ def init_db():
                 CREATE TABLE IF NOT EXISTS kv_store (
                     key TEXT PRIMARY KEY,
                     value BLOB NOT NULL,
+                    version INTEGER NOT NULL DEFAULT 1,
                     updated_at INTEGER NOT NULL
                 );
             """)
+
+            # Migration: Add version column to existing databases
+            try:
+                cursor = conn.cursor()
+                cursor.execute("PRAGMA table_info(kv_store)")
+                columns = [col["name"] for col in cursor.fetchall()]
+                if "version" not in columns:
+                    conn.execute("ALTER TABLE kv_store ADD COLUMN version INTEGER NOT NULL DEFAULT 1")
+            except Exception:
+                pass
 
         # Populate in-memory bloom filter from existing keys
         try:
@@ -339,14 +354,88 @@ def kv_set(key: str, data: Any):
 
     with conn:
         conn.execute("""
-            INSERT INTO kv_store (key, value, updated_at)
-            VALUES (?, ?, ?)
+            INSERT INTO kv_store (key, value, version, updated_at)
+            VALUES (?, ?, 1, ?)
             ON CONFLICT(key) DO UPDATE SET
                 value = excluded.value,
+                version = version + 1,
                 updated_at = excluded.updated_at;
         """, (key, encrypted_blob, now_ts))
 
     bloom.add(key)
+
+
+def kv_get_versioned(key: str, default: Any = None) -> tuple[Any, int]:
+    """Retrieve both the decrypted payload and its current version number."""
+    init_db()
+
+    # Fast Bloom filter check: if definitely not in database, return 0-disk miss immediately
+    if not bloom.contains(key):
+        return default, 0
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT value, version FROM kv_store WHERE key = ?", (key,))
+    row = cursor.fetchone()
+    if row is None:
+        return default, 0
+
+    try:
+        data = decrypt_and_unpack(row["value"])
+        return data, row["version"]
+    except Exception as e:
+        print(f"[Database] Error decrypting versioned kv '{key}': {e}")
+        return default, 0
+
+
+def kv_set_versioned(key: str, data: Any, expected_version: int) -> int:
+    """
+    Atomically write a JSON document only if its current database version matches expected_version.
+    Increments and returns the new version number upon success.
+    Raises ConcurrentModificationError on mismatch.
+    """
+    init_db()
+    conn = get_db_connection()
+    encrypted_blob = pack_and_encrypt(data)
+    import time
+    now_ts = int(time.time())
+
+    with conn:
+        if expected_version == 0:
+            # Expected new document (creation constraint)
+            try:
+                conn.execute("""
+                    INSERT INTO kv_store (key, value, version, updated_at)
+                    VALUES (?, ?, 1, ?)
+                """, (key, encrypted_blob, now_ts))
+                bloom.add(key)
+                return 1
+            except sqlite3.IntegrityError:
+                raise ConcurrentModificationError(
+                    f"Cannot write key '{key}' with expected_version=0: record already exists."
+                )
+        else:
+            # Conditional atomic update matching the version
+            cursor = conn.execute("""
+                UPDATE kv_store
+                SET value = ?, version = version + 1, updated_at = ?
+                WHERE key = ? AND version = ?
+            """, (encrypted_blob, now_ts, key, expected_version))
+            
+            if cursor.rowcount == 0:
+                # No row was updated; find out why (missing record vs version mismatch)
+                check_cursor = conn.execute("SELECT version FROM kv_store WHERE key = ?", (key,))
+                row = check_cursor.fetchone()
+                if row is None:
+                    raise ConcurrentModificationError(
+                        f"Cannot update key '{key}': record does not exist (expected version {expected_version})."
+                    )
+                else:
+                    actual_version = row["version"]
+                    raise ConcurrentModificationError(
+                        f"Conflict detected on key '{key}': current version is {actual_version}, but expected {expected_version}."
+                    )
+            return expected_version + 1
 
 
 def kv_delete(key: str) -> bool:
@@ -474,10 +563,11 @@ def kv_mset(mapping: dict[str, Any]):
 
     with conn:
         conn.executemany("""
-            INSERT INTO kv_store (key, value, updated_at)
-            VALUES (?, ?, ?)
+            INSERT INTO kv_store (key, value, version, updated_at)
+            VALUES (?, ?, 1, ?)
             ON CONFLICT(key) DO UPDATE SET
                 value = excluded.value,
+                version = version + 1,
                 updated_at = excluded.updated_at;
         """, batch_records)
 
@@ -521,13 +611,14 @@ def rotate_encryption_key(old_key: str | bytes, new_key: str | bytes) -> dict:
 
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT key, value, updated_at FROM kv_store")
+    cursor.execute("SELECT key, value, version, updated_at FROM kv_store")
     rows = cursor.fetchall()
 
     re_encrypted_records = []
     for row in rows:
         key = row["key"]
         old_blob = row["value"]
+        ver = row["version"]
         ts = row["updated_at"]
         try:
             # Decrypt: auto-detect prefix/type and decrypt with the correct cipher
@@ -549,14 +640,14 @@ def rotate_encryption_key(old_key: str | bytes, new_key: str | bytes) -> dict:
             else:
                 new_blob = pack_and_encrypt(data, cipher=new_aesgcm)
 
-            re_encrypted_records.append((key, new_blob, ts))
+            re_encrypted_records.append((key, new_blob, ver, ts))
         except Exception:
             continue
 
     # Atomic write of all rotated records
     with conn:
-        for key, new_blob, ts in re_encrypted_records:
-            conn.execute("UPDATE kv_store SET value = ?, updated_at = ? WHERE key = ?", (new_blob, ts, key))
+        for key, new_blob, ver, ts in re_encrypted_records:
+            conn.execute("UPDATE kv_store SET value = ?, version = ?, updated_at = ? WHERE key = ?", (new_blob, ver, ts, key))
 
     # Update active in-memory cipher keys
     set_cipher_key(new_key)

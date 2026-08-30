@@ -343,7 +343,42 @@ users = kv_mget(["user_1.json", "user_2.json"])
 
 ---
 
-### 10. Ultra-Fast In-Memory RAM Compression
+### 10. Optimistic Concurrency Control (OCC)
+
+To prevent concurrent tasks from overwriting each other's updates (lost updates), the engine tracks an integer version number for every document. You can use version-constrained writes to ensure data integrity:
+
+```python
+from src import kv_get_versioned, kv_set_versioned, ConcurrentModificationError
+
+# 1. Retrieve the document along with its current version number
+data, version = kv_get_versioned("user_profile.json")
+
+# 2. Perform your data modification
+data["gold"] += 50
+
+# 3. Perform a version-constrained write (passes only if the db version is still `version`)
+try:
+    new_version = kv_set_versioned("user_profile.json", data, expected_version=version)
+    print(f"Write successful! New version: {new_version}")
+except ConcurrentModificationError as e:
+    print(f"Write failed: {e}. Reload data and retry.")
+
+# 4. Strict Creation Constraint (pass `expected_version=0` to ensure key does not exist yet)
+try:
+    kv_set_versioned("new_user.json", {"username": "Alex"}, expected_version=0)
+except ConcurrentModificationError:
+    print("Record already exists!")
+```
+
+The native asynchronous equivalents are also available for async frameworks:
+```python
+data, version = await async_kv_get_versioned("user_profile.json")
+new_version = await async_kv_set_versioned("user_profile.json", data, expected_version=version)
+```
+
+---
+
+### 11. Ultra-Fast In-Memory RAM Compression
 
 ```python
 from src.cache import cache
@@ -356,7 +391,7 @@ cache.set("large_history.json", {"actions": ["log_event" for _ in range(500)]})
 
 ---
 
-### 11. Fast Document Query & Wildcard Search
+### 12. Fast Document Query & Wildcard Search
 
 ```python
 from src import kv_search, kv_find, kv_count
@@ -379,7 +414,7 @@ encrypted-sqlite count --pattern "ticket_*"
 
 ---
 
-### 12. Encrypted Cloud Backup & Disaster Recovery (Cloudflare R2 / AWS S3)
+### 13. Encrypted Cloud Backup & Disaster Recovery (Cloudflare R2 / AWS S3)
 
 ```python
 from src import cloud_sync
@@ -404,7 +439,7 @@ encrypted-sqlite cloud-restore backups/snapshot_20260827.db
 
 ---
 
-### 13. Zero-Install NPX CLI (Node.js / JS / TS Support)
+### 14. Zero-Install NPX CLI (Node.js / JS / TS Support)
 
 Run the CLI instantly from any terminal without installing global packages:
 
@@ -424,7 +459,7 @@ npx encrypted-sqlite export --sanitize --out ./backup_export
 
 ---
 
-### 14. Dual Encryption & Automated Background Key Rotation
+### 15. Dual Encryption & Automated Background Key Rotation
 
 The engine supports **both AES-256-GCM (default) and AES-128-Fernet** encryption. You can configure which algorithm is active for newly written data via environment variables.
 

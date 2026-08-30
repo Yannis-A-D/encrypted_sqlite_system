@@ -10,7 +10,10 @@ import asyncio
 from typing import Any
 from pathlib import Path
 from .secure_json import load_json, save_json, DATA_DIR
-from .database import kv_delete, db_maintenance, rotate_encryption_key, kv_search, kv_find, kv_count
+from .database import (
+    kv_delete, db_maintenance, rotate_encryption_key, kv_search, kv_find, kv_count,
+    kv_get_versioned, kv_set_versioned
+)
 from .cache import cache, _lock
 
 
@@ -100,3 +103,13 @@ async def async_cloud_restore(remote_key: str) -> bool:
     """Asynchronously restore database from cloud backup."""
     from .cloud_sync import cloud_sync
     return await asyncio.to_thread(cloud_sync.restore_from_cloud, remote_key=remote_key)
+
+
+async def async_kv_get_versioned(key: str, default: Any = None) -> tuple[Any, int]:
+    """Asynchronously retrieve both the decrypted payload and its current version number."""
+    return await asyncio.to_thread(kv_get_versioned, key, default)
+
+
+async def async_kv_set_versioned(key: str, data: Any, expected_version: int) -> int:
+    """Asynchronously write a JSON document only if its current database version matches expected_version."""
+    return await asyncio.to_thread(kv_set_versioned, key, data, expected_version)

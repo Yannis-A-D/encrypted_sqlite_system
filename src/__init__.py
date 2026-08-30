@@ -8,6 +8,9 @@ from .database import (
     get_db_connection,
     kv_get,
     kv_set,
+    kv_get_versioned,
+    kv_set_versioned,
+    ConcurrentModificationError,
     kv_mget,
     kv_mset,
     kv_delete,
@@ -32,6 +35,8 @@ from .async_engine import (
     async_count,
     async_cloud_backup,
     async_cloud_restore,
+    async_kv_get_versioned,
+    async_kv_set_versioned,
 )
 from .integrity import verify_database_integrity, compute_record_checksum
 from .adapters import BaseL1Adapter, MemoryL1Adapter, CompressedMemoryL1Adapter, RedisL1Adapter
@@ -46,6 +51,9 @@ __all__ = [
     "get_db_connection",
     "kv_get",
     "kv_set",
+    "kv_get_versioned",
+    "kv_set_versioned",
+    "ConcurrentModificationError",
     "kv_mget",
     "kv_mset",
     "kv_delete",
@@ -71,6 +79,8 @@ __all__ = [
     "async_count",
     "async_cloud_backup",
     "async_cloud_restore",
+    "async_kv_get_versioned",
+    "async_kv_set_versioned",
     "verify_database_integrity",
     "compute_record_checksum",
     "BaseL1Adapter",

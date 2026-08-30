@@ -43,7 +43,10 @@ try:
         db_maintenance,
         rotate_encryption_key,
         kv_get,
+        kv_set,
+        kv_delete,
         kv_search,
+        kv_find_by_index,
         kv_count,
     )
     from src.cache import cache
@@ -58,7 +61,10 @@ except ImportError:
         db_maintenance,
         rotate_encryption_key,
         kv_get,
+        kv_set,
+        kv_delete,
         kv_search,
+        kv_find_by_index,
         kv_count,
     )
     from .cache import cache
@@ -272,6 +278,112 @@ def cmd_cloud_restore(args):
         print("❌ Cloud restore failed. Check S3 credentials and backup key name.\n")
 
 
+def cmd_shell(args):
+    """Enter the interactive encrypted-sqlite shell."""
+    import shlex
+    print("\n" + "=" * 60)
+    print(" 🔐 ENCRYPTED SQLITE INTERACTIVE SHELL")
+    print("=" * 60)
+    print(" Type 'help' to see list of commands, or 'exit'/'quit' to exit.")
+    print("=" * 60 + "\n")
+
+    # Read-Eval-Print Loop (REPL)
+    while True:
+        try:
+            line = input("encrypted-sqlite> ").strip()
+            if not line:
+                continue
+
+            parts = shlex.split(line)
+            cmd = parts[0].lower()
+
+            if cmd in ("exit", "quit"):
+                print("Goodbye!")
+                break
+            elif cmd == "help":
+                print("\nAvailable Commands:")
+                print("  get <key>             : Retrieve and print a decrypted document")
+                print("  set <key> <json>      : Store a document (e.g. set user.json '{\"level\": 1}')")
+                print("  delete <key>          : Delete a document by key")
+                print("  keys [<pattern>]      : List keys, optionally matching a glob pattern")
+                print("  find <field> <value>  : Query documents by blind index (e.g. find username 'Alex')")
+                print("  stats                 : Display database stats")
+                print("  exit / quit           : Exit the shell\n")
+            elif cmd == "get":
+                if len(parts) < 2:
+                    print("Usage: get <key>")
+                    continue
+                key = parts[1]
+                data = kv_get(key)
+                if data is None:
+                    print(f"Key '{key}' not found.")
+                else:
+                    print(json.dumps(data, indent=2, ensure_ascii=False))
+            elif cmd == "set":
+                if len(parts) < 3:
+                    print("Usage: set <key> <json_data>")
+                    continue
+                key = parts[1]
+                json_str = parts[2]
+                try:
+                    data = json.loads(json_str)
+                    kv_set(key, data)
+                    print(f"Success: Key '{key}' stored.")
+                except json.JSONDecodeError as je:
+                    print(f"Error: Invalid JSON data: {je}")
+                except Exception as e:
+                    print(f"Error: Failed to store key '{key}': {e}")
+            elif cmd == "delete":
+                if len(parts) < 2:
+                    print("Usage: delete <key>")
+                    continue
+                key = parts[1]
+                res = kv_delete(key)
+                if res:
+                    print(f"Success: Key '{key}' deleted.")
+                else:
+                    print(f"Key '{key}' not found or could not be deleted.")
+            elif cmd == "keys":
+                pattern = parts[1] if len(parts) > 1 else "*"
+                keys = kv_search(pattern=pattern)
+                print(f"Found {len(keys)} key(s):")
+                for k in keys:
+                    print(f"  - {k}")
+            elif cmd == "find":
+                if len(parts) < 3:
+                    print("Usage: find <field_name> <value>")
+                    continue
+                field = parts[1]
+                val = parts[2]
+                if val.isdigit():
+                    val = int(val)
+                else:
+                    try:
+                        val = float(val)
+                    except ValueError:
+                        pass
+                res = kv_find_by_index(field, val)
+                if not res:
+                    print(f"No records found matching {field} = {val}.")
+                else:
+                    print(f"Found {len(res)} record(s):")
+                    print(json.dumps(res, indent=2, ensure_ascii=False))
+            elif cmd == "stats":
+                class MockArgs:
+                    path = None
+                cmd_stats(MockArgs())
+            else:
+                print(f"Unknown command: '{cmd}'. Type 'help' for available commands.")
+        except KeyboardInterrupt:
+            print("\nGoodbye!")
+            break
+        except EOFError:
+            print("\nGoodbye!")
+            break
+        except Exception as e:
+            print(f"Error: {e}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="encrypted-sqlite",
@@ -332,6 +444,9 @@ def main():
     p_cr = subparsers.add_parser("cloud-restore", help="Restore database from a remote cloud backup key")
     p_cr.add_argument("key", help="Remote backup key (e.g. backups/snapshot_20260827.db)")
 
+    # shell
+    subparsers.add_parser("shell", help="Enter the interactive encrypted-sqlite REPL shell")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -352,6 +467,7 @@ def main():
         "cloud-backup": cmd_cloud_backup,
         "cloud-list": cmd_cloud_list,
         "cloud-restore": cmd_cloud_restore,
+        "shell": cmd_shell,
     }
 
     cmd_fn = dispatch.get(args.command)

@@ -17,6 +17,8 @@ import threading
 import base64
 from pathlib import Path
 from typing import Any
+import hashlib
+import hmac
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.fernet import Fernet, InvalidToken
 from cryptography.exceptions import InvalidTag
@@ -24,6 +26,24 @@ from cryptography.exceptions import InvalidTag
 class ConcurrentModificationError(Exception):
     """Raised when a concurrent write occurs and version numbers do not match."""
     pass
+
+
+# Blind indexing configuration
+_indexed_fields: set[str] = set()
+env_fields = os.getenv("BLIND_INDEX_FIELDS")
+if env_fields:
+    _indexed_fields = {f.strip() for f in env_fields.split(",") if f.strip()}
+
+
+def set_indexed_fields(fields: list[str] | set[str]):
+    """Configure which JSON fields are dynamically indexed in SQLite."""
+    global _indexed_fields
+    _indexed_fields = {str(f).strip() for f in fields if str(f).strip()}
+
+
+def get_indexed_fields() -> list[str]:
+    """Retrieve the currently configured blind indexed fields."""
+    return sorted(list(_indexed_fields))
 
 # Thread-local storage for SQLite connections
 _local = threading.local()
@@ -103,6 +123,7 @@ def set_cipher_key(new_key: str | bytes):
         if len(key_material) == 32:
             _cipher_aesgcm = AESGCM(key_material)
             _cipher_fernet = Fernet(new_key)
+            os.environ["ENCRYPTION_KEY"] = new_key.decode("utf-8")
             return
     except Exception:
         pass
@@ -110,8 +131,58 @@ def set_cipher_key(new_key: str | bytes):
     if len(new_key) == 32:
         _cipher_aesgcm = AESGCM(new_key)
         _cipher_fernet = Fernet(base64.urlsafe_b64encode(new_key))
+        os.environ["ENCRYPTION_KEY"] = base64.urlsafe_b64encode(new_key).decode("utf-8")
     else:
         raise ValueError("Key must be 32 bytes or 44-character URL-safe Base64 encoded key.")
+
+
+def _get_indexing_key() -> bytes:
+    """Derive a secure 32-byte indexing key from the master encryption key."""
+    raw_key = os.getenv("ENCRYPTION_KEY")
+    if not raw_key:
+        key_file = ROOT_DIR / "secret.key"
+        if key_file.exists():
+            raw_key = key_file.read_text().strip()
+        else:
+            _get_ciphers()
+            raw_key = key_file.read_text().strip()
+
+    if isinstance(raw_key, str):
+        raw_key = raw_key.encode("utf-8")
+
+    return hmac.new(raw_key, b"blind-indexing-salt", hashlib.sha256).digest()
+
+
+def compute_blind_index(value: Any) -> str:
+    """Compute a secure, deterministic blind index hash for a queryable value."""
+    if value is None:
+        return ""
+    val_str = str(value).strip()
+    idx_key = _get_indexing_key()
+    return hmac.new(idx_key, val_str.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _update_blind_indexes(conn, key: str, data: Any, custom_derived_key: bytes | None = None):
+    """Index configured fields in the database for the given key/document."""
+    conn.execute("DELETE FROM blind_indexes WHERE key = ?", (key,))
+
+    if not isinstance(data, dict) or not _indexed_fields:
+        return
+
+    index_records = []
+    idx_key = custom_derived_key if custom_derived_key is not None else _get_indexing_key()
+
+    for field in _indexed_fields:
+        if field in data:
+            val_str = str(data[field]).strip()
+            val_hash = hmac.new(idx_key, val_str.encode("utf-8"), hashlib.sha256).hexdigest()
+            index_records.append((key, field, val_hash))
+
+    if index_records:
+        conn.executemany("""
+            INSERT OR REPLACE INTO blind_indexes (key, field_name, field_hash)
+            VALUES (?, ?, ?)
+        """, index_records)
 
 
 from . import serializers
@@ -282,6 +353,17 @@ def init_db():
                     updated_at INTEGER NOT NULL
                 );
             """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS blind_indexes (
+                    key TEXT NOT NULL,
+                    field_name TEXT NOT NULL,
+                    field_hash TEXT NOT NULL,
+                    PRIMARY KEY (key, field_name)
+                );
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_blind_hash ON blind_indexes (field_name, field_hash);
+            """)
 
             # Migration: Add version column to existing databases
             try:
@@ -361,6 +443,7 @@ def kv_set(key: str, data: Any):
                 version = version + 1,
                 updated_at = excluded.updated_at;
         """, (key, encrypted_blob, now_ts))
+        _update_blind_indexes(conn, key, data)
 
     bloom.add(key)
 
@@ -408,6 +491,7 @@ def kv_set_versioned(key: str, data: Any, expected_version: int) -> int:
                     INSERT INTO kv_store (key, value, version, updated_at)
                     VALUES (?, ?, 1, ?)
                 """, (key, encrypted_blob, now_ts))
+                _update_blind_indexes(conn, key, data)
                 bloom.add(key)
                 return 1
             except sqlite3.IntegrityError:
@@ -435,14 +519,16 @@ def kv_set_versioned(key: str, data: Any, expected_version: int) -> int:
                     raise ConcurrentModificationError(
                         f"Conflict detected on key '{key}': current version is {actual_version}, but expected {expected_version}."
                     )
+            _update_blind_indexes(conn, key, data)
             return expected_version + 1
 
 
 def kv_delete(key: str) -> bool:
-    """Delete a document by key from kv_store."""
+    """Delete a document by key from kv_store and clear its blind indexes."""
     init_db()
     conn = get_db_connection()
     with conn:
+        conn.execute("DELETE FROM blind_indexes WHERE key = ?", (key,))
         cur = conn.execute("DELETE FROM kv_store WHERE key = ?", (key,))
         return cur.rowcount > 0
 
@@ -486,6 +572,22 @@ def kv_find(
             continue
 
     return matches
+
+
+def kv_find_by_index(field_name: str, value: Any) -> dict[str, Any]:
+    """
+    Find and decrypt all documents where the specified field matches value.
+    Uses blind indexes for fast O(1) SQL-side lookups.
+    """
+    init_db()
+    val_hash = compute_blind_index(value)
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT key FROM blind_indexes WHERE field_name = ? AND field_hash = ?", (field_name, val_hash))
+    keys = [row["key"] for row in cursor.fetchall()]
+    if not keys:
+        return {}
+    return kv_mget(keys)
 
 
 def kv_count(pattern: str | None = None) -> int:
@@ -570,6 +672,10 @@ def kv_mset(mapping: dict[str, Any]):
                 version = version + 1,
                 updated_at = excluded.updated_at;
         """, batch_records)
+        
+        # Update blind indexes for each document in the batch
+        for key, data in mapping.items():
+            _update_blind_indexes(conn, key, data)
 
 
 def rotate_encryption_key(old_key: str | bytes, new_key: str | bytes) -> dict:
@@ -640,14 +746,18 @@ def rotate_encryption_key(old_key: str | bytes, new_key: str | bytes) -> dict:
             else:
                 new_blob = pack_and_encrypt(data, cipher=new_aesgcm)
 
-            re_encrypted_records.append((key, new_blob, ver, ts))
+            re_encrypted_records.append((key, new_blob, ver, ts, data))
         except Exception:
             continue
 
+    # Derive new index key for rotation
+    new_idx_key = hmac.new(new_key, b"blind-indexing-salt", hashlib.sha256).digest()
+
     # Atomic write of all rotated records
     with conn:
-        for key, new_blob, ver, ts in re_encrypted_records:
+        for key, new_blob, ver, ts, data in re_encrypted_records:
             conn.execute("UPDATE kv_store SET value = ?, version = ?, updated_at = ? WHERE key = ?", (new_blob, ver, ts, key))
+            _update_blind_indexes(conn, key, data, custom_derived_key=new_idx_key)
 
     # Update active in-memory cipher keys
     set_cipher_key(new_key)

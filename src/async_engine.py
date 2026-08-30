@@ -12,7 +12,7 @@ from pathlib import Path
 from .secure_json import load_json, save_json, DATA_DIR
 from .database import (
     kv_delete, db_maintenance, rotate_encryption_key, kv_search, kv_find, kv_count,
-    kv_get_versioned, kv_set_versioned
+    kv_get_versioned, kv_set_versioned, kv_find_by_index
 )
 from .cache import cache, _lock
 
@@ -113,3 +113,8 @@ async def async_kv_get_versioned(key: str, default: Any = None) -> tuple[Any, in
 async def async_kv_set_versioned(key: str, data: Any, expected_version: int) -> int:
     """Asynchronously write a JSON document only if its current database version matches expected_version."""
     return await asyncio.to_thread(kv_set_versioned, key, data, expected_version)
+
+
+async def async_kv_find_by_index(field_name: str, value: Any) -> dict[str, Any]:
+    """Asynchronously find and decrypt documents where field_name matches value using blind indexes."""
+    return await asyncio.to_thread(kv_find_by_index, field_name, value)

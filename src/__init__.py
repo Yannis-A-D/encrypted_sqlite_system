@@ -16,6 +16,9 @@ from .database import (
     kv_delete,
     kv_search,
     kv_find,
+    kv_find_by_index,
+    set_indexed_fields,
+    get_indexed_fields,
     kv_count,
     rotate_encryption_key,
     db_maintenance,
@@ -37,6 +40,7 @@ from .async_engine import (
     async_cloud_restore,
     async_kv_get_versioned,
     async_kv_set_versioned,
+    async_kv_find_by_index,
 )
 from .integrity import verify_database_integrity, compute_record_checksum
 from .adapters import BaseL1Adapter, MemoryL1Adapter, CompressedMemoryL1Adapter, RedisL1Adapter
@@ -59,6 +63,9 @@ __all__ = [
     "kv_delete",
     "kv_search",
     "kv_find",
+    "kv_find_by_index",
+    "set_indexed_fields",
+    "get_indexed_fields",
     "kv_count",
     "rotate_encryption_key",
     "db_maintenance",
@@ -81,6 +88,7 @@ __all__ = [
     "async_cloud_restore",
     "async_kv_get_versioned",
     "async_kv_set_versioned",
+    "async_kv_find_by_index",
     "verify_database_integrity",
     "compute_record_checksum",
     "BaseL1Adapter",

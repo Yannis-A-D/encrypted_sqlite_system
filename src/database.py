@@ -23,6 +23,16 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.fernet import Fernet, InvalidToken
 from cryptography.exceptions import InvalidTag
 
+try:
+    import zstandard as zstd
+    _HAS_ZSTD = True
+    _zstd_compressor = zstd.ZstdCompressor(level=3)
+    _zstd_decompressor = zstd.ZstdDecompressor()
+except ImportError:
+    _HAS_ZSTD = False
+    _zstd_compressor = None
+    _zstd_decompressor = None
+
 class ConcurrentModificationError(Exception):
     """Raised when a concurrent write occurs and version numbers do not match."""
     pass
@@ -61,8 +71,38 @@ _cipher_fernet: Fernet | None = None
 
 _PREFIX_GCM = b"G256:"
 _PREFIX_FERNET = b"F128:"
-_MAGIC_COMPRESSED = b"ZL1:"
+_MAGIC_COMPRESSED_ZL = b"ZL1:"
+_MAGIC_COMPRESSED_ZSTD = b"ZS1:"
+_MAGIC_COMPRESSED = _MAGIC_COMPRESSED_ZL
 _MAGIC_RAW = b"RW1:"
+
+_compression_override: str | None = None
+
+
+def get_active_compression() -> str:
+    """Get the currently active compression algorithm ('ZSTD', 'ZLIB', or 'NONE')."""
+    global _compression_override
+    if _compression_override is not None:
+        return _compression_override.upper()
+    env_comp = os.getenv("COMPRESSION_ALGORITHM", "AUTO").upper()
+    if env_comp == "AUTO" or env_comp == "":
+        return "ZSTD" if _HAS_ZSTD else "ZLIB"
+    return env_comp
+
+
+def set_active_compression(codec: str | None):
+    """Set the active compression algorithm ('ZSTD', 'ZLIB', 'NONE', or None for auto)."""
+    global _compression_override
+    if codec is not None:
+        codec_up = codec.upper()
+        if codec_up not in ("ZSTD", "ZLIB", "NONE", "AUTO"):
+            raise ValueError(f"Unsupported compression codec: {codec}. Must be 'ZSTD', 'ZLIB', 'NONE', or 'AUTO'.")
+        if codec_up == "AUTO":
+            _compression_override = None
+        else:
+            _compression_override = codec_up
+    else:
+        _compression_override = None
 
 
 def get_active_algorithm() -> str:
@@ -192,9 +232,13 @@ def pack_and_encrypt(data: Any, cipher: Any = None) -> bytes:
     """Serialize, compress, encrypt, and prefix with algorithm identifier."""
     raw_bytes = serializers.dumps(data)
 
-    # Compress if payload is larger than 128 bytes
-    if len(raw_bytes) > 128:
-        payload = _MAGIC_COMPRESSED + zlib.compress(raw_bytes, level=6)
+    # Compress if payload is larger than 128 bytes and compression is enabled
+    comp_algo = get_active_compression()
+    if len(raw_bytes) > 128 and comp_algo != "NONE":
+        if comp_algo == "ZSTD" and _HAS_ZSTD and _zstd_compressor is not None:
+            payload = _MAGIC_COMPRESSED_ZSTD + _zstd_compressor.compress(raw_bytes)
+        else:
+            payload = _MAGIC_COMPRESSED_ZL + zlib.compress(raw_bytes, level=6)
     else:
         payload = _MAGIC_RAW + raw_bytes
 
@@ -289,8 +333,14 @@ def decrypt_and_unpack(encrypted_blob: bytes, cipher: Any = None) -> Any:
                 decrypted = aesgcm_cipher.decrypt(nonce, ciphertext, associated_data=None)
 
     # Decompress and deserialize
-    if decrypted.startswith(_MAGIC_COMPRESSED):
-        raw_bytes = zlib.decompress(decrypted[len(_MAGIC_COMPRESSED):])
+    if decrypted.startswith(_MAGIC_COMPRESSED_ZSTD):
+        if _HAS_ZSTD and _zstd_decompressor is not None:
+            raw_bytes = _zstd_decompressor.decompress(decrypted[len(_MAGIC_COMPRESSED_ZSTD):])
+        else:
+            import zstandard as zstd
+            raw_bytes = zstd.ZstdDecompressor().decompress(decrypted[len(_MAGIC_COMPRESSED_ZSTD):])
+    elif decrypted.startswith(_MAGIC_COMPRESSED_ZL):
+        raw_bytes = zlib.decompress(decrypted[len(_MAGIC_COMPRESSED_ZL):])
     elif decrypted.startswith(_MAGIC_RAW):
         raw_bytes = decrypted[len(_MAGIC_RAW):]
     else:

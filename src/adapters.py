@@ -68,14 +68,26 @@ class MemoryL1Adapter(BaseL1Adapter):
 class CompressedMemoryL1Adapter(BaseL1Adapter):
     """
     Ultra-Fast In-Memory L1 Compressed Cache Adapter.
-    Compresses data in RAM using fast zlib level-1, reducing RAM usage by 70-80%
+    Compresses data in RAM using adaptive Zstandard or zlib, reducing RAM usage by 70-80%
     while maintaining sub-millisecond lookups.
     """
-    def __init__(self, max_capacity: int = 10000):
-        import zlib
-        self._zlib = zlib
+    def __init__(self, max_capacity: int = 10000, codec: str = "auto"):
         self.max_capacity = max_capacity
         self.store: OrderedDict[str, tuple[bytes, float]] = OrderedDict()
+        self.codec = codec.lower()
+        
+        try:
+            import zstandard as zstd
+            self._has_zstd = True
+            self._zstd_compressor = zstd.ZstdCompressor(level=1)
+            self._zstd_decompressor = zstd.ZstdDecompressor()
+        except ImportError:
+            self._has_zstd = False
+            self._zstd_compressor = None
+            self._zstd_decompressor = None
+
+        import zlib
+        self._zlib = zlib
 
     def get(self, key: str) -> tuple[Any, bool]:
         if key in self.store:
@@ -85,7 +97,20 @@ class CompressedMemoryL1Adapter(BaseL1Adapter):
                 self.store.move_to_end(key)
                 try:
                     from . import serializers
-                    decompressed = self._zlib.decompress(raw_blob)
+                    if raw_blob.startswith(b"ZS1:"):
+                        if self._has_zstd and self._zstd_decompressor is not None:
+                            decompressed = self._zstd_decompressor.decompress(raw_blob[4:])
+                        else:
+                            import zstandard as zstd
+                            decompressed = zstd.ZstdDecompressor().decompress(raw_blob[4:])
+                    elif raw_blob.startswith(b"ZL1:"):
+                        decompressed = self._zlib.decompress(raw_blob[4:])
+                    else:
+                        # Legacy unprefixed zlib
+                        try:
+                            decompressed = self._zlib.decompress(raw_blob)
+                        except Exception:
+                            decompressed = raw_blob
                     return serializers.loads(decompressed), True
                 except Exception:
                     pass
@@ -99,7 +124,12 @@ class CompressedMemoryL1Adapter(BaseL1Adapter):
         try:
             from . import serializers
             raw_bytes = serializers.dumps(value)
-            compressed = self._zlib.compress(raw_bytes, level=1)
+            use_zstd = (self.codec in ("zstd", "auto") and self._has_zstd and self._zstd_compressor is not None)
+            if use_zstd:
+                compressed = b"ZS1:" + self._zstd_compressor.compress(raw_bytes)
+            else:
+                compressed = b"ZL1:" + self._zlib.compress(raw_bytes, level=1)
+
             if key in self.store:
                 self.store.move_to_end(key)
             self.store[key] = (compressed, expire_at)

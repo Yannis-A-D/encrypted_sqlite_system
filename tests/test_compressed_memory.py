@@ -28,7 +28,7 @@ def test_two_tier_cache_use_compressed_memory():
     """Verify TwoTierCache switching to compressed memory."""
     c = TwoTierCache()
     c.use_compressed_memory(max_capacity=2000)
-    assert c.get_stats()["l1_adapter"] == "Compressed Memory (LZ/Zlib)"
+    assert c.get_stats()["l1_adapter"] == "Compressed Memory (Zstandard/Zlib)"
 
     c.set("big_profile.json", {"username": "Gamer", "history": [1, 2, 3, 4, 5]})
     assert c.get("big_profile.json") == {"username": "Gamer", "history": [1, 2, 3, 4, 5]}

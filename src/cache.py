@@ -199,7 +199,7 @@ class TwoTierCache:
             if isinstance(self._adapter, RedisL1Adapter):
                 adapter_type = "Redis"
             elif isinstance(self._adapter, CompressedMemoryL1Adapter):
-                adapter_type = "Compressed Memory (LZ/Zlib)"
+                adapter_type = "Compressed Memory (Zstandard/Zlib)"
             else:
                 adapter_type = "Memory (LRU)"
 

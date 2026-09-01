@@ -48,6 +48,7 @@ try:
         kv_search,
         kv_find_by_index,
         kv_count,
+        purge_expired_records,
     )
     from src.cache import cache
     from src.masking import mask_pii
@@ -66,6 +67,7 @@ except ImportError:
         kv_search,
         kv_find_by_index,
         kv_count,
+        purge_expired_records,
     )
     from .cache import cache
     from .masking import mask_pii
@@ -278,6 +280,12 @@ def cmd_cloud_restore(args):
         print("❌ Cloud restore failed. Check S3 credentials and backup key name.\n")
 
 
+def cmd_purge_expired(args):
+    """Purge expired records from the SQLite database."""
+    purged = purge_expired_records()
+    print(f"\n🧹 Purged {purged} expired record(s) from database.\n")
+
+
 def cmd_shell(args):
     """Enter the interactive encrypted-sqlite shell."""
     import shlex
@@ -303,10 +311,11 @@ def cmd_shell(args):
             elif cmd == "help":
                 print("\nAvailable Commands:")
                 print("  get <key>             : Retrieve and print a decrypted document")
-                print("  set <key> <json>      : Store a document (e.g. set user.json '{\"level\": 1}')")
+                print("  set <key> <json> [ttl]: Store a document with optional TTL in seconds")
                 print("  delete <key>          : Delete a document by key")
                 print("  keys [<pattern>]      : List keys, optionally matching a glob pattern")
                 print("  find <field> <value>  : Query documents by blind index (e.g. find username 'Alex')")
+                print("  purge                 : Purge all expired records from database")
                 print("  stats                 : Display database stats")
                 print("  exit / quit           : Exit the shell\n")
             elif cmd == "get":
@@ -321,14 +330,16 @@ def cmd_shell(args):
                     print(json.dumps(data, indent=2, ensure_ascii=False))
             elif cmd == "set":
                 if len(parts) < 3:
-                    print("Usage: set <key> <json_data>")
+                    print("Usage: set <key> <json_data> [<ttl_seconds>]")
                     continue
                 key = parts[1]
                 json_str = parts[2]
+                ttl = float(parts[3]) if len(parts) > 3 else None
                 try:
                     data = json.loads(json_str)
-                    kv_set(key, data)
-                    print(f"Success: Key '{key}' stored.")
+                    kv_set(key, data, ttl=ttl)
+                    ttl_msg = f" (TTL: {ttl}s)" if ttl else ""
+                    print(f"Success: Key '{key}' stored{ttl_msg}.")
                 except json.JSONDecodeError as je:
                     print(f"Error: Invalid JSON data: {je}")
                 except Exception as e:
@@ -368,6 +379,9 @@ def cmd_shell(args):
                 else:
                     print(f"Found {len(res)} record(s):")
                     print(json.dumps(res, indent=2, ensure_ascii=False))
+            elif cmd == "purge":
+                purged = purge_expired_records()
+                print(f"Purged {purged} expired record(s).")
             elif cmd == "stats":
                 class MockArgs:
                     path = None
@@ -444,6 +458,9 @@ def main():
     p_cr = subparsers.add_parser("cloud-restore", help="Restore database from a remote cloud backup key")
     p_cr.add_argument("key", help="Remote backup key (e.g. backups/snapshot_20260827.db)")
 
+    # purge-expired
+    subparsers.add_parser("purge-expired", help="Purge all expired records and blind indexes from database")
+
     # shell
     subparsers.add_parser("shell", help="Enter the interactive encrypted-sqlite REPL shell")
 
@@ -467,6 +484,7 @@ def main():
         "cloud-backup": cmd_cloud_backup,
         "cloud-list": cmd_cloud_list,
         "cloud-restore": cmd_cloud_restore,
+        "purge-expired": cmd_purge_expired,
         "shell": cmd_shell,
     }
 

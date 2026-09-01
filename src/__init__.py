@@ -22,6 +22,9 @@ from .database import (
     get_active_compression,
     set_active_compression,
     kv_count,
+    purge_expired_records,
+    scavenger,
+    TTLScavenger,
     rotate_encryption_key,
     db_maintenance,
     bloom,
@@ -43,6 +46,7 @@ from .async_engine import (
     async_kv_get_versioned,
     async_kv_set_versioned,
     async_kv_find_by_index,
+    async_purge_expired,
 )
 from .integrity import verify_database_integrity, compute_record_checksum
 from .adapters import BaseL1Adapter, MemoryL1Adapter, CompressedMemoryL1Adapter, RedisL1Adapter
@@ -71,6 +75,9 @@ __all__ = [
     "get_active_compression",
     "set_active_compression",
     "kv_count",
+    "purge_expired_records",
+    "scavenger",
+    "TTLScavenger",
     "rotate_encryption_key",
     "db_maintenance",
     "bloom",
@@ -93,6 +100,7 @@ __all__ = [
     "async_kv_get_versioned",
     "async_kv_set_versioned",
     "async_kv_find_by_index",
+    "async_purge_expired",
     "verify_database_integrity",
     "compute_record_checksum",
     "BaseL1Adapter",

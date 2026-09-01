@@ -400,8 +400,25 @@ def init_db():
                     key TEXT PRIMARY KEY,
                     value BLOB NOT NULL,
                     version INTEGER NOT NULL DEFAULT 1,
+                    expires_at INTEGER NOT NULL DEFAULT 0,
                     updated_at INTEGER NOT NULL
                 );
+            """)
+
+            # Migration: Add version and expires_at columns to existing databases
+            try:
+                cursor = conn.cursor()
+                cursor.execute("PRAGMA table_info(kv_store)")
+                columns = [col["name"] for col in cursor.fetchall()]
+                if "version" not in columns:
+                    conn.execute("ALTER TABLE kv_store ADD COLUMN version INTEGER NOT NULL DEFAULT 1")
+                if "expires_at" not in columns:
+                    conn.execute("ALTER TABLE kv_store ADD COLUMN expires_at INTEGER NOT NULL DEFAULT 0")
+            except Exception:
+                pass
+
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_kv_expires ON kv_store (expires_at);
             """)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS blind_indexes (
@@ -414,16 +431,6 @@ def init_db():
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_blind_hash ON blind_indexes (field_name, field_hash);
             """)
-
-            # Migration: Add version column to existing databases
-            try:
-                cursor = conn.cursor()
-                cursor.execute("PRAGMA table_info(kv_store)")
-                columns = [col["name"] for col in cursor.fetchall()]
-                if "version" not in columns:
-                    conn.execute("ALTER TABLE kv_store ADD COLUMN version INTEGER NOT NULL DEFAULT 1")
-            except Exception:
-                pass
 
         # Populate in-memory bloom filter from existing keys
         try:
@@ -449,13 +456,21 @@ def init_db():
             except Exception as e:
                 print(f"[Database] Failed to start auto-key rotation: {e}")
 
+        # Check if auto TTL scavenger is enabled in env (default: true)
+        auto_scavenger = os.getenv("AUTO_TTL_SCAVENGER", "true").lower() in ("true", "1", "yes")
+        if auto_scavenger:
+            try:
+                scavenger.start()
+            except Exception:
+                pass
+
         _db_initialized = True
 
 
 # ─── Key-Value Store Operations ───────────────────────────────────────────────
 
 def kv_get(key: str, default: Any = None) -> Any:
-    """Retrieve, decrypt, and decompress a JSON document from kv_store."""
+    """Retrieve, decrypt, and decompress a JSON document from kv_store with TTL check."""
     init_db()
 
     # Fast Bloom filter check: if definitely not in database, return 0-disk miss immediately
@@ -464,9 +479,19 @@ def kv_get(key: str, default: Any = None) -> Any:
 
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT value FROM kv_store WHERE key = ?", (key,))
+    cursor.execute("SELECT value, expires_at FROM kv_store WHERE key = ?", (key,))
     row = cursor.fetchone()
     if row is None:
+        return default
+
+    # Check database-level TTL
+    import time
+    now_ts = int(time.time())
+    if row["expires_at"] > 0 and row["expires_at"] <= now_ts:
+        try:
+            kv_delete(key)
+        except Exception:
+            pass
         return default
 
     try:
@@ -476,30 +501,32 @@ def kv_get(key: str, default: Any = None) -> Any:
         return default
 
 
-def kv_set(key: str, data: Any):
-    """Compress, encrypt, and store any Python dict/list into kv_store."""
+def kv_set(key: str, data: Any, ttl: int | float | None = None):
+    """Compress, encrypt, and store any Python dict/list into kv_store with optional TTL (seconds)."""
     init_db()
     conn = get_db_connection()
     encrypted_blob = pack_and_encrypt(data)
     import time
     now_ts = int(time.time())
+    expires_at = int(now_ts + ttl) if (ttl is not None and ttl > 0) else 0
 
     with conn:
         conn.execute("""
-            INSERT INTO kv_store (key, value, version, updated_at)
-            VALUES (?, ?, 1, ?)
+            INSERT INTO kv_store (key, value, version, expires_at, updated_at)
+            VALUES (?, ?, 1, ?, ?)
             ON CONFLICT(key) DO UPDATE SET
                 value = excluded.value,
                 version = version + 1,
+                expires_at = excluded.expires_at,
                 updated_at = excluded.updated_at;
-        """, (key, encrypted_blob, now_ts))
+        """, (key, encrypted_blob, expires_at, now_ts))
         _update_blind_indexes(conn, key, data)
 
     bloom.add(key)
 
 
 def kv_get_versioned(key: str, default: Any = None) -> tuple[Any, int]:
-    """Retrieve both the decrypted payload and its current version number."""
+    """Retrieve both the decrypted payload and its current version number with TTL check."""
     init_db()
 
     # Fast Bloom filter check: if definitely not in database, return 0-disk miss immediately
@@ -508,9 +535,18 @@ def kv_get_versioned(key: str, default: Any = None) -> tuple[Any, int]:
 
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT value, version FROM kv_store WHERE key = ?", (key,))
+    cursor.execute("SELECT value, version, expires_at FROM kv_store WHERE key = ?", (key,))
     row = cursor.fetchone()
     if row is None:
+        return default, 0
+
+    import time
+    now_ts = int(time.time())
+    if row["expires_at"] > 0 and row["expires_at"] <= now_ts:
+        try:
+            kv_delete(key)
+        except Exception:
+            pass
         return default, 0
 
     try:
@@ -521,7 +557,7 @@ def kv_get_versioned(key: str, default: Any = None) -> tuple[Any, int]:
         return default, 0
 
 
-def kv_set_versioned(key: str, data: Any, expected_version: int) -> int:
+def kv_set_versioned(key: str, data: Any, expected_version: int, ttl: int | float | None = None) -> int:
     """
     Atomically write a JSON document only if its current database version matches expected_version.
     Increments and returns the new version number upon success.
@@ -532,15 +568,16 @@ def kv_set_versioned(key: str, data: Any, expected_version: int) -> int:
     encrypted_blob = pack_and_encrypt(data)
     import time
     now_ts = int(time.time())
+    expires_at = int(now_ts + ttl) if (ttl is not None and ttl > 0) else 0
 
     with conn:
         if expected_version == 0:
             # Expected new document (creation constraint)
             try:
                 conn.execute("""
-                    INSERT INTO kv_store (key, value, version, updated_at)
-                    VALUES (?, ?, 1, ?)
-                """, (key, encrypted_blob, now_ts))
+                    INSERT INTO kv_store (key, value, version, expires_at, updated_at)
+                    VALUES (?, ?, 1, ?, ?)
+                """, (key, encrypted_blob, expires_at, now_ts))
                 _update_blind_indexes(conn, key, data)
                 bloom.add(key)
                 return 1
@@ -552,9 +589,9 @@ def kv_set_versioned(key: str, data: Any, expected_version: int) -> int:
             # Conditional atomic update matching the version
             cursor = conn.execute("""
                 UPDATE kv_store
-                SET value = ?, version = version + 1, updated_at = ?
+                SET value = ?, version = version + 1, expires_at = ?, updated_at = ?
                 WHERE key = ? AND version = ?
-            """, (encrypted_blob, now_ts, key, expected_version))
+            """, (encrypted_blob, expires_at, now_ts, key, expected_version))
             
             if cursor.rowcount == 0:
                 # No row was updated; find out why (missing record vs version mismatch)
@@ -585,15 +622,23 @@ def kv_delete(key: str) -> bool:
 
 def kv_search(pattern: str = "*", limit: int | None = None) -> list[str]:
     """
-    Search all keys matching a wildcard glob pattern (e.g. 'user_*', 'ticket_*.json').
+    Search all non-expired keys matching a wildcard glob pattern (e.g. 'user_*', 'ticket_*.json').
     """
     init_db()
     conn = get_db_connection()
     cursor = conn.cursor()
+    import time
+    now_ts = int(time.time())
     if limit is not None and limit > 0:
-        cursor.execute("SELECT key FROM kv_store WHERE key GLOB ? ORDER BY updated_at DESC LIMIT ?", (pattern, limit))
+        cursor.execute(
+            "SELECT key FROM kv_store WHERE key GLOB ? AND (expires_at == 0 OR expires_at > ?) ORDER BY updated_at DESC LIMIT ?",
+            (pattern, now_ts, limit)
+        )
     else:
-        cursor.execute("SELECT key FROM kv_store WHERE key GLOB ? ORDER BY updated_at DESC", (pattern,))
+        cursor.execute(
+            "SELECT key FROM kv_store WHERE key GLOB ? AND (expires_at == 0 OR expires_at > ?) ORDER BY updated_at DESC",
+            (pattern, now_ts)
+        )
     return [row["key"] for row in cursor.fetchall()]
 
 
@@ -627,13 +672,19 @@ def kv_find(
 def kv_find_by_index(field_name: str, value: Any) -> dict[str, Any]:
     """
     Find and decrypt all documents where the specified field matches value.
-    Uses blind indexes for fast O(1) SQL-side lookups.
+    Uses blind indexes for fast O(1) SQL-side lookups while filtering out expired records.
     """
     init_db()
     val_hash = compute_blind_index(value)
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT key FROM blind_indexes WHERE field_name = ? AND field_hash = ?", (field_name, val_hash))
+    import time
+    now_ts = int(time.time())
+    cursor.execute("""
+        SELECT b.key FROM blind_indexes b
+        JOIN kv_store k ON b.key = k.key
+        WHERE b.field_name = ? AND b.field_hash = ? AND (k.expires_at == 0 OR k.expires_at > ?)
+    """, (field_name, val_hash, now_ts))
     keys = [row["key"] for row in cursor.fetchall()]
     if not keys:
         return {}
@@ -641,14 +692,22 @@ def kv_find_by_index(field_name: str, value: Any) -> dict[str, Any]:
 
 
 def kv_count(pattern: str | None = None) -> int:
-    """Return total number of stored documents, optionally matching a pattern."""
+    """Return total number of non-expired stored documents, optionally matching a pattern."""
     init_db()
     conn = get_db_connection()
     cursor = conn.cursor()
+    import time
+    now_ts = int(time.time())
     if pattern:
-        cursor.execute("SELECT COUNT(*) AS total FROM kv_store WHERE key GLOB ?", (pattern,))
+        cursor.execute(
+            "SELECT COUNT(*) AS total FROM kv_store WHERE key GLOB ? AND (expires_at == 0 OR expires_at > ?)",
+            (pattern, now_ts)
+        )
     else:
-        cursor.execute("SELECT COUNT(*) AS total FROM kv_store")
+        cursor.execute(
+            "SELECT COUNT(*) AS total FROM kv_store WHERE (expires_at == 0 OR expires_at > ?)",
+            (now_ts,)
+        )
     row = cursor.fetchone()
     return row["total"] if row else 0
 
@@ -656,7 +715,7 @@ def kv_count(pattern: str | None = None) -> int:
 def kv_mget(keys: list[str]) -> dict[str, Any]:
     """
     Retrieve and decrypt multiple JSON documents in a single SQL batch query
-    with parallel multi-core thread pool decryption.
+    with parallel multi-core thread pool decryption and TTL filtering.
     """
     if not keys:
         return {}
@@ -664,15 +723,22 @@ def kv_mget(keys: list[str]) -> dict[str, Any]:
     init_db()
     conn = get_db_connection()
     cursor = conn.cursor()
+    import time
+    now_ts = int(time.time())
     placeholders = ",".join("?" * len(keys))
-    cursor.execute(f"SELECT key, value FROM kv_store WHERE key IN ({placeholders})", keys)
+    cursor.execute(f"SELECT key, value, expires_at FROM kv_store WHERE key IN ({placeholders})", keys)
     rows = cursor.fetchall()
 
     if not rows:
         return {}
 
+    # Filter out expired rows
+    active_rows = [r for r in rows if (r["expires_at"] == 0 or r["expires_at"] > now_ts)]
+    if not active_rows:
+        return {}
+
     results = {}
-    if len(rows) > 8:
+    if len(active_rows) > 8:
         # Parallel decryption across CPU cores for large batches
         from concurrent.futures import ThreadPoolExecutor
         def _decrypt_item(row):
@@ -682,11 +748,11 @@ def kv_mget(keys: list[str]) -> dict[str, Any]:
                 return row["key"], None
 
         with ThreadPoolExecutor(max_workers=min(16, os.cpu_count() or 4)) as executor:
-            for k, val in executor.map(_decrypt_item, rows):
+            for k, val in executor.map(_decrypt_item, active_rows):
                 if val is not None:
                     results[k] = val
     else:
-        for row in rows:
+        for row in active_rows:
             try:
                 results[row["key"]] = decrypt_and_unpack(row["value"])
             except Exception:
@@ -695,9 +761,9 @@ def kv_mget(keys: list[str]) -> dict[str, Any]:
     return results
 
 
-def kv_mset(mapping: dict[str, Any]):
+def kv_mset(mapping: dict[str, Any], ttl: int | float | None = None):
     """
-    Compress, encrypt, and commit multiple JSON documents in a single atomic SQL transaction.
+    Compress, encrypt, and commit multiple JSON documents in a single atomic SQL transaction with optional TTL.
     """
     if not mapping:
         return
@@ -706,26 +772,80 @@ def kv_mset(mapping: dict[str, Any]):
     conn = get_db_connection()
     import time
     now_ts = int(time.time())
+    expires_at = int(now_ts + ttl) if (ttl is not None and ttl > 0) else 0
 
     batch_records = []
     for key, data in mapping.items():
         encrypted_blob = pack_and_encrypt(data)
-        batch_records.append((key, encrypted_blob, now_ts))
+        batch_records.append((key, encrypted_blob, expires_at, now_ts))
         bloom.add(key)
 
     with conn:
         conn.executemany("""
-            INSERT INTO kv_store (key, value, version, updated_at)
-            VALUES (?, ?, 1, ?)
+            INSERT INTO kv_store (key, value, version, expires_at, updated_at)
+            VALUES (?, ?, 1, ?, ?)
             ON CONFLICT(key) DO UPDATE SET
                 value = excluded.value,
                 version = version + 1,
+                expires_at = excluded.expires_at,
                 updated_at = excluded.updated_at;
         """, batch_records)
         
         # Update blind indexes for each document in the batch
         for key, data in mapping.items():
             _update_blind_indexes(conn, key, data)
+
+
+def purge_expired_records() -> int:
+    """
+    Purge all expired records from SQLite and clear their blind indexes.
+    Returns the count of purged documents.
+    """
+    init_db()
+    conn = get_db_connection()
+    import time
+    now_ts = int(time.time())
+    with conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT key FROM kv_store WHERE expires_at > 0 AND expires_at <= ?", (now_ts,))
+        rows = cursor.fetchall()
+        if not rows:
+            return 0
+        
+        conn.execute("DELETE FROM blind_indexes WHERE key IN (SELECT key FROM kv_store WHERE expires_at > 0 AND expires_at <= ?)", (now_ts,))
+        cur = conn.execute("DELETE FROM kv_store WHERE expires_at > 0 AND expires_at <= ?", (now_ts,))
+        return cur.rowcount
+
+
+class TTLScavenger:
+    """Background daemon thread that periodically purges expired SQLite rows."""
+    def __init__(self, interval_seconds: float = 60.0):
+        self.interval = interval_seconds
+        self._thread: threading.Thread | None = None
+        self._stop_event = threading.Event()
+
+    def start(self):
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop_event.clear()
+        self._thread = threading.Thread(target=self._run, daemon=True, name="TTLScavengerDaemon")
+        self._thread.start()
+
+    def stop(self):
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+            self._thread = None
+
+    def _run(self):
+        while not self._stop_event.wait(self.interval):
+            try:
+                purge_expired_records()
+            except Exception:
+                pass
+
+
+scavenger = TTLScavenger(interval_seconds=60.0)
 
 
 def rotate_encryption_key(old_key: str | bytes, new_key: str | bytes) -> dict:
@@ -767,7 +887,7 @@ def rotate_encryption_key(old_key: str | bytes, new_key: str | bytes) -> dict:
 
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT key, value, version, updated_at FROM kv_store")
+    cursor.execute("SELECT key, value, version, expires_at, updated_at FROM kv_store")
     rows = cursor.fetchall()
 
     re_encrypted_records = []
@@ -775,6 +895,7 @@ def rotate_encryption_key(old_key: str | bytes, new_key: str | bytes) -> dict:
         key = row["key"]
         old_blob = row["value"]
         ver = row["version"]
+        exp = row["expires_at"]
         ts = row["updated_at"]
         try:
             # Decrypt: auto-detect prefix/type and decrypt with the correct cipher
@@ -796,7 +917,7 @@ def rotate_encryption_key(old_key: str | bytes, new_key: str | bytes) -> dict:
             else:
                 new_blob = pack_and_encrypt(data, cipher=new_aesgcm)
 
-            re_encrypted_records.append((key, new_blob, ver, ts, data))
+            re_encrypted_records.append((key, new_blob, ver, exp, ts, data))
         except Exception:
             continue
 
@@ -805,8 +926,8 @@ def rotate_encryption_key(old_key: str | bytes, new_key: str | bytes) -> dict:
 
     # Atomic write of all rotated records
     with conn:
-        for key, new_blob, ver, ts, data in re_encrypted_records:
-            conn.execute("UPDATE kv_store SET value = ?, version = ?, updated_at = ? WHERE key = ?", (new_blob, ver, ts, key))
+        for key, new_blob, ver, exp, ts, data in re_encrypted_records:
+            conn.execute("UPDATE kv_store SET value = ?, version = ?, expires_at = ?, updated_at = ? WHERE key = ?", (new_blob, ver, exp, ts, key))
             _update_blind_indexes(conn, key, data, custom_derived_key=new_idx_key)
 
     # Update active in-memory cipher keys

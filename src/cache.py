@@ -108,18 +108,21 @@ class TwoTierCache:
 
         return default
 
-    def set(self, key: str, data: Any, ttl: float | None = None):
+    def set(self, key: str, data: Any, ttl: float | None = None, db_ttl: float | None = None):
         """
         Set key in L1 RAM and persist to L2 SQLite (Synchronous or Write-Behind).
+        ttl: Time-To-Live for L1 RAM Cache (defaults to default_ttl_seconds).
+        db_ttl: Time-To-Live for L2 SQLite persistent storage (None = permanent).
         """
-        self.set_l1_only(key, data, ttl)
+        effective_l1_ttl = ttl if (ttl is not None and ttl > 0) else None
+        self.set_l1_only(key, data, effective_l1_ttl)
 
         if self._write_behind_engine is not None:
             self._write_behind_engine.queue_write(key, data)
         else:
             from .database import kv_set
             try:
-                kv_set(key, data)
+                kv_set(key, data, ttl=db_ttl)
             except Exception as e:
                 print(f"[TwoTierCache] Error persisting '{key}' to L2 SQLite: {e}")
 
@@ -152,19 +155,20 @@ class TwoTierCache:
 
         return results
 
-    def mset(self, mapping: dict[str, Any]):
+    def mset(self, mapping: dict[str, Any], ttl: float | None = None, db_ttl: float | None = None):
         """
         Batch write multiple documents to L1 RAM and SQLite in a single atomic transaction.
         """
+        effective_l1_ttl = ttl if (ttl is not None and ttl > 0) else None
         for k, val in mapping.items():
-            self.set_l1_only(k, val)
+            self.set_l1_only(k, val, effective_l1_ttl)
 
         if self._write_behind_engine is not None:
             for k, val in mapping.items():
                 self._write_behind_engine.queue_write(k, val)
         else:
             from .database import kv_mset
-            kv_mset(mapping)
+            kv_mset(mapping, ttl=db_ttl)
 
         with _lock:
             self._writes += len(mapping)

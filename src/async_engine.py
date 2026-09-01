@@ -9,15 +9,15 @@ import time
 import asyncio
 from typing import Any
 from pathlib import Path
-from .secure_json import load_json, save_json, DATA_DIR
+from .secure_json import load_json, save_json, DATA_DIR, _DEFAULT_UNSET
 from .database import (
     kv_delete, db_maintenance, rotate_encryption_key, kv_search, kv_find, kv_count,
-    kv_get_versioned, kv_set_versioned, kv_find_by_index
+    kv_get_versioned, kv_set_versioned, kv_find_by_index, purge_expired_records
 )
 from .cache import cache, _lock
 
 
-async def async_load_json(file_or_key: str | Path, default: Any = None) -> Any:
+async def async_load_json(file_or_key: str | Path, default: Any = _DEFAULT_UNSET) -> Any:
     """
     Asynchronously load and decrypt a JSON document without blocking the asyncio loop.
     Returns immediately if cached in L1 RAM; otherwise reads and decrypts on a worker thread.
@@ -38,11 +38,11 @@ async def async_load_json(file_or_key: str | Path, default: Any = None) -> Any:
     return await asyncio.to_thread(load_json, file_or_key, default)
 
 
-async def async_save_json(file_or_key: str | Path, data: Any, ttl: int | None = None) -> bool:
+async def async_save_json(file_or_key: str | Path, data: Any, indent: int = 2, ttl: float | None = None) -> bool:
     """
-    Asynchronously compress, encrypt, and commit a document to SQLite & L1 RAM.
+    Asynchronously compress, encrypt, and commit a document to SQLite & L1 RAM with optional TTL.
     """
-    await asyncio.to_thread(save_json, file_or_key, data, ttl)
+    await asyncio.to_thread(save_json, file_or_key, data, indent, ttl)
     return True
 
 
@@ -110,11 +110,16 @@ async def async_kv_get_versioned(key: str, default: Any = None) -> tuple[Any, in
     return await asyncio.to_thread(kv_get_versioned, key, default)
 
 
-async def async_kv_set_versioned(key: str, data: Any, expected_version: int) -> int:
-    """Asynchronously write a JSON document only if its current database version matches expected_version."""
-    return await asyncio.to_thread(kv_set_versioned, key, data, expected_version)
+async def async_kv_set_versioned(key: str, data: Any, expected_version: int, ttl: float | None = None) -> int:
+    """Asynchronously write a JSON document only if its current database version matches expected_version with optional TTL."""
+    return await asyncio.to_thread(kv_set_versioned, key, data, expected_version, ttl)
 
 
 async def async_kv_find_by_index(field_name: str, value: Any) -> dict[str, Any]:
     """Asynchronously find and decrypt documents where field_name matches value using blind indexes."""
     return await asyncio.to_thread(kv_find_by_index, field_name, value)
+
+
+async def async_purge_expired() -> int:
+    """Asynchronously purge all expired documents and blind indexes from SQLite."""
+    return await asyncio.to_thread(purge_expired_records)

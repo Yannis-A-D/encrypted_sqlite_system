@@ -31,13 +31,15 @@ def _resolve_path(path: str | Path) -> Path:
     return DATA_DIR / p.name
 
 
-def load_json(path: str | Path, default: Any = None) -> Any:
+_DEFAULT_UNSET = object()
+
+
+def load_json(path: str | Path, default: Any = _DEFAULT_UNSET) -> Any:
     """
     Load and decrypt data using Two-Tier Caching (L1 RAM -> L2 SQLite).
     Falls back gracefully to disk if not yet in cache.
     """
-    if default is None:
-        default = {}
+    fallback = {} if default is _DEFAULT_UNSET else default
 
     path = _resolve_path(path)
     key_name = path.name
@@ -49,11 +51,11 @@ def load_json(path: str | Path, default: Any = None) -> Any:
 
     # 2. Fallback to reading encrypted file on disk
     if not path.exists():
-        return default
+        return fallback
 
     raw = path.read_bytes()
     if not raw:
-        return default
+        return fallback
 
     # Try decryption first
     try:
@@ -98,10 +100,10 @@ def load_json(path: str | Path, default: Any = None) -> Any:
         cache.set_l1_only(key_name, data)
         return data
     except Exception:
-        return default
+        return fallback
 
 
-def save_json(path: str | Path, data: Any, indent: int = 2):
+def save_json(path: str | Path, data: Any, indent: int = 2, ttl: float | None = None):
     """
     Serialise data to JSON, encrypt it, and write to:
     1. L1 Memory Cache (<0.01ms access)
@@ -114,11 +116,20 @@ def save_json(path: str | Path, data: Any, indent: int = 2):
 
     # 1. Update Two-Tier Cache (L1 RAM + L2 SQLite)
     try:
-        cache.set(key_name, data)
+        cache.set(key_name, data, ttl=ttl, db_ttl=ttl)
     except Exception as e:
         print(f"[TwoTierCache] Write warning on {key_name}: {e}")
 
-    # 2. Atomic write to encrypted disk file for backup safety
+    # 2. For temporary TTL records, do not write permanent static disk file
+    if ttl is not None:
+        if path.exists():
+            try:
+                path.unlink()
+            except Exception:
+                pass
+        return
+
+    # 3. Atomic write to encrypted disk file for permanent backup safety
     plaintext = json.dumps(data, indent=indent, ensure_ascii=False).encode("utf-8")
     
     algo = get_active_algorithm()

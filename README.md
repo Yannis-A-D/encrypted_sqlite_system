@@ -511,6 +511,46 @@ export COMPRESSION_ALGORITHM=ZSTD  # Options: ZSTD, ZLIB, NONE
 
 ---
 
+### 17. Database-Level TTL & Auto-Expiring Records
+
+Set self-destructing records directly at the SQLite disk layer for temporary sessions, rate-limit windows, verification codes (OTPs), or caching tokens:
+
+```python
+from src import save_json, load_json, kv_set, kv_get, purge_expired_records, scavenger
+
+# 1. Store a document with a 60-second TTL
+save_json("session_token.json", {"user_id": 42, "auth": True}, ttl=60)
+
+# 2. Direct Low-Level KV with TTL
+kv_set("rate_limit:user_42", {"requests": 5}, ttl=10)
+
+# 3. Optimistic Concurrency Control with TTL
+from src import kv_set_versioned
+kv_set_versioned("temp_otp.json", {"otp": 981245}, expected_version=0, ttl=300)
+
+# 4. Lazy Auto-Cleanup:
+# Expired keys immediately return None / default on read and delete the expired SQLite row.
+
+# 5. Manual or Background Scavenger Daemon:
+# Manually purge all expired records and their blind indexes:
+purged_count = purge_expired_records()
+print(f"Purged {purged_count} expired records.")
+
+# Start or configure background scavenger daemon:
+scavenger.start()
+```
+
+```bash
+# Purge expired records from the command line:
+encrypted-sqlite purge-expired
+
+# Or in the interactive shell:
+encrypted-sqlite> set session.json '{"token": "xyz"}' 60
+encrypted-sqlite> purge
+```
+
+---
+
 ## 📁 Project Structure
 
 ```

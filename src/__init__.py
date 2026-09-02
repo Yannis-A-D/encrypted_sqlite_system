@@ -53,6 +53,7 @@ from .adapters import BaseL1Adapter, MemoryL1Adapter, CompressedMemoryL1Adapter,
 from .write_behind import WriteBehindEngine
 from .bloom_filter import BloomFilter
 from .cloud_sync import CloudSyncEngine, cloud_sync
+from .events import events, EventDispatcher, ChangeEvent
 from . import serializers
 
 __version__ = "1.0.0"
@@ -111,5 +112,8 @@ __all__ = [
     "BloomFilter",
     "CloudSyncEngine",
     "cloud_sync",
+    "events",
+    "EventDispatcher",
+    "ChangeEvent",
     "serializers",
 ]

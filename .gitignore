@@ -12,8 +12,7 @@ bot.env
 *.db
 *.db-wal
 *.db-shm
-data/*.db*
-data/*.tmp
+data/
 
 # IDEs
 .idea/

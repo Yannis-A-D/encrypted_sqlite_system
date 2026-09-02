@@ -523,6 +523,11 @@ def kv_set(key: str, data: Any, ttl: int | float | None = None):
         _update_blind_indexes(conn, key, data)
 
     bloom.add(key)
+    try:
+        from .events import events
+        events.emit("write", key=key, value=data)
+    except Exception:
+        pass
 
 
 def kv_get_versioned(key: str, default: Any = None) -> tuple[Any, int]:
@@ -580,7 +585,7 @@ def kv_set_versioned(key: str, data: Any, expected_version: int, ttl: int | floa
                 """, (key, encrypted_blob, expires_at, now_ts))
                 _update_blind_indexes(conn, key, data)
                 bloom.add(key)
-                return 1
+                new_ver = 1
             except sqlite3.IntegrityError:
                 raise ConcurrentModificationError(
                     f"Cannot write key '{key}' with expected_version=0: record already exists."
@@ -607,7 +612,15 @@ def kv_set_versioned(key: str, data: Any, expected_version: int, ttl: int | floa
                         f"Conflict detected on key '{key}': current version is {actual_version}, but expected {expected_version}."
                     )
             _update_blind_indexes(conn, key, data)
-            return expected_version + 1
+            new_ver = expected_version + 1
+
+    try:
+        from .events import events
+        events.emit("write", key=key, value=data)
+    except Exception:
+        pass
+
+    return new_ver
 
 
 def kv_delete(key: str) -> bool:
@@ -617,7 +630,14 @@ def kv_delete(key: str) -> bool:
     with conn:
         conn.execute("DELETE FROM blind_indexes WHERE key = ?", (key,))
         cur = conn.execute("DELETE FROM kv_store WHERE key = ?", (key,))
-        return cur.rowcount > 0
+        deleted = cur.rowcount > 0
+        if deleted:
+            try:
+                from .events import events
+                events.emit("delete", key=key)
+            except Exception:
+                pass
+        return deleted
 
 
 def kv_search(pattern: str = "*", limit: int | None = None) -> list[str]:
@@ -795,6 +815,13 @@ def kv_mset(mapping: dict[str, Any], ttl: int | float | None = None):
         for key, data in mapping.items():
             _update_blind_indexes(conn, key, data)
 
+    try:
+        from .events import events
+        for key, data in mapping.items():
+            events.emit("write", key=key, value=data)
+    except Exception:
+        pass
+
 
 def purge_expired_records() -> int:
     """
@@ -812,8 +839,17 @@ def purge_expired_records() -> int:
         if not rows:
             return 0
         
+        expired_keys = [r["key"] for r in rows]
         conn.execute("DELETE FROM blind_indexes WHERE key IN (SELECT key FROM kv_store WHERE expires_at > 0 AND expires_at <= ?)", (now_ts,))
         cur = conn.execute("DELETE FROM kv_store WHERE expires_at > 0 AND expires_at <= ?", (now_ts,))
+        
+        try:
+            from .events import events
+            for k in expired_keys:
+                events.emit("expire", key=k)
+        except Exception:
+            pass
+
         return cur.rowcount
 
 

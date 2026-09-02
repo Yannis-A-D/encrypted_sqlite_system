@@ -551,6 +551,39 @@ encrypted-sqlite> purge
 
 ---
 
+### 18. Change Data Capture (CDC) & Reactive Event Hooks
+
+Subscribe to document lifecycle events (`write`, `delete`, `expire`, `change`) with wildcard pattern filtering and error isolation:
+
+```python
+from src import cache, events, ChangeEvent
+
+# 1. Listen for writes to all user profiles using decorator syntax
+@cache.on("write", pattern="user_*.json")
+def on_user_saved(event: ChangeEvent):
+    print(f"User updated: {event.key} -> {event.value}")
+
+# 2. Listen for document deletions
+@cache.on("delete")
+def on_document_deleted(event: ChangeEvent):
+    print(f"Document deleted: {event.key}")
+
+# 3. Listen for TTL auto-expiration events
+@cache.on("expire")
+def on_record_expired(event: ChangeEvent):
+    print(f"Record expired and purged: {event.key}")
+
+# 4. Async coroutine listener support
+@cache.on("change", pattern="guild:*:config")
+async def on_guild_config_changed(event: ChangeEvent):
+    await notify_discord_cog(event.key, event.value)
+
+# 5. Unsubscribe when needed
+cache.off("write", on_user_saved)
+```
+
+---
+
 ## 📁 Project Structure
 
 ```

@@ -222,6 +222,23 @@ class TwoTierCache:
                 stats["write_behind_stats"] = self._write_behind_engine.get_stats()
             return stats
 
+    def on(self, event: str, callback: Any = None, pattern: str = "*"):
+        """
+        Subscribe to document change events (write, delete, expire, change).
+        Can be used directly or as a decorator:
+
+            @cache.on("write", pattern="user_*.json")
+            def on_user_change(event):
+                print(event.key, event.value)
+        """
+        from .events import events
+        return events.on(event, callback=callback, pattern=pattern)
+
+    def off(self, event: str, callback: Any) -> bool:
+        """Unsubscribe a callback from an event."""
+        from .events import events
+        return events.off(event, callback)
+
 
 # Global Two-Tier Cache Singleton Instance
 cache = TwoTierCache(max_l1_items=1000, default_ttl_seconds=3600.0 * 24)

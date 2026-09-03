@@ -286,6 +286,23 @@ def cmd_purge_expired(args):
     print(f"\n🧹 Purged {purged} expired record(s) from database.\n")
 
 
+def cmd_metrics(args):
+    """Display Prometheus metrics or start HTTP exporter server."""
+    from .metrics import metrics, start_metrics_server
+    if getattr(args, "serve", False):
+        print(f"\n🚀 Starting Prometheus metrics exporter at http://{args.host}:{args.port}/metrics")
+        print("Press Ctrl+C to stop.")
+        server = start_metrics_server(port=args.port, host=args.host)
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            print("\nShutting down metrics server.")
+            server.shutdown()
+    else:
+        print(metrics.export_prometheus())
+
+
 def cmd_shell(args):
     """Enter the interactive encrypted-sqlite shell."""
     import shlex
@@ -316,6 +333,7 @@ def cmd_shell(args):
                 print("  keys [<pattern>]      : List keys, optionally matching a glob pattern")
                 print("  find <field> <value>  : Query documents by blind index (e.g. find username 'Alex')")
                 print("  purge                 : Purge all expired records from database")
+                print("  metrics               : Output Prometheus metrics text")
                 print("  stats                 : Display database stats")
                 print("  exit / quit           : Exit the shell\n")
             elif cmd == "get":
@@ -382,6 +400,9 @@ def cmd_shell(args):
             elif cmd == "purge":
                 purged = purge_expired_records()
                 print(f"Purged {purged} expired record(s).")
+            elif cmd == "metrics":
+                from .metrics import metrics
+                print(metrics.export_prometheus())
             elif cmd == "stats":
                 class MockArgs:
                     path = None
@@ -461,6 +482,12 @@ def main():
     # purge-expired
     subparsers.add_parser("purge-expired", help="Purge all expired records and blind indexes from database")
 
+    # metrics
+    p_metrics = subparsers.add_parser("metrics", help="Export Prometheus metrics or start HTTP scraping endpoint")
+    p_metrics.add_argument("--serve", action="store_true", help="Start background HTTP metrics server")
+    p_metrics.add_argument("--port", type=int, default=9108, help="Port to listen on (default: 9108)")
+    p_metrics.add_argument("--host", default="0.0.0.0", help="Host interface to bind to (default: 0.0.0.0)")
+
     # shell
     subparsers.add_parser("shell", help="Enter the interactive encrypted-sqlite REPL shell")
 
@@ -485,6 +512,7 @@ def main():
         "cloud-list": cmd_cloud_list,
         "cloud-restore": cmd_cloud_restore,
         "purge-expired": cmd_purge_expired,
+        "metrics": cmd_metrics,
         "shell": cmd_shell,
     }
 

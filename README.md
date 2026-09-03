@@ -584,6 +584,43 @@ cache.off("write", on_user_saved)
 
 ---
 
+### 19. Prometheus & OpenTelemetry Metrics Exporter
+
+Real-time telemetry tracking operations, cache hit ratios, and p50/p95/p99 encryption and decryption latency percentiles with zero external dependencies:
+
+```python
+from src import metrics, start_metrics_server
+
+# 1. Output Prometheus text exposition format (version 0.0.4)
+print(metrics.export_prometheus())
+
+# 2. Output OpenTelemetry OTLP JSON dictionary
+otel_payload = metrics.export_opentelemetry()
+
+# 3. Inspect operation latencies (seconds)
+p_stats = metrics.get_quantiles("encrypt")
+print(f"P50: {p_stats['p50']*1000:.2f}ms | P95: {p_stats['p95']*1000:.2f}ms | P99: {p_stats['p99']*1000:.2f}ms")
+
+# 4. Start embedded scraping HTTP server in background thread
+server = start_metrics_server(port=9108, host="0.0.0.0")
+# Scrape endpoint: http://localhost:9108/metrics
+# Health endpoint: http://localhost:9108/health
+```
+
+#### CLI Exporter:
+```bash
+# Print live Prometheus metrics:
+encrypted-sqlite metrics
+
+# Start Prometheus metrics HTTP daemon on port 9108:
+encrypted-sqlite metrics --serve --port 9108
+
+# Or in the interactive shell:
+encrypted-sqlite> metrics
+```
+
+---
+
 ## 📁 Project Structure
 
 ```

@@ -15,6 +15,7 @@ import zlib
 import sqlite3
 import threading
 import base64
+import time
 from pathlib import Path
 from typing import Any
 import hashlib
@@ -230,6 +231,7 @@ from . import serializers
 
 def pack_and_encrypt(data: Any, cipher: Any = None) -> bytes:
     """Serialize, compress, encrypt, and prefix with algorithm identifier."""
+    t0 = time.perf_counter()
     raw_bytes = serializers.dumps(data)
 
     # Compress if payload is larger than 128 bytes and compression is enabled
@@ -247,29 +249,38 @@ def pack_and_encrypt(data: Any, cipher: Any = None) -> bytes:
         if isinstance(cipher, AESGCM):
             nonce = os.urandom(12)
             ciphertext = cipher.encrypt(nonce, payload, associated_data=None)
-            return _PREFIX_GCM + nonce + ciphertext
+            res = _PREFIX_GCM + nonce + ciphertext
         elif isinstance(cipher, Fernet):
             ciphertext = cipher.encrypt(payload)
-            return _PREFIX_FERNET + ciphertext
+            res = _PREFIX_FERNET + ciphertext
         else:
             raise TypeError("Cipher must be an instance of AESGCM or Fernet.")
-
-    # Otherwise, encrypt using the active algorithm
-    aesgcm_cipher, fernet_cipher = _get_ciphers()
-    algo = get_active_algorithm()
-
-    if algo == "AES-128-FERNET":
-        ciphertext = fernet_cipher.encrypt(payload)
-        return _PREFIX_FERNET + ciphertext
     else:
-        # Default to AES-256-GCM
-        nonce = os.urandom(12)
-        ciphertext = aesgcm_cipher.encrypt(nonce, payload, associated_data=None)
-        return _PREFIX_GCM + nonce + ciphertext
+        # Otherwise, encrypt using the active algorithm
+        aesgcm_cipher, fernet_cipher = _get_ciphers()
+        algo = get_active_algorithm()
+
+        if algo == "AES-128-FERNET":
+            ciphertext = fernet_cipher.encrypt(payload)
+            res = _PREFIX_FERNET + ciphertext
+        else:
+            # Default to AES-256-GCM
+            nonce = os.urandom(12)
+            ciphertext = aesgcm_cipher.encrypt(nonce, payload, associated_data=None)
+            res = _PREFIX_GCM + nonce + ciphertext
+
+    try:
+        from .metrics import metrics
+        metrics.record_latency("encrypt", time.perf_counter() - t0)
+    except Exception:
+        pass
+
+    return res
 
 
 def decrypt_and_unpack(encrypted_blob: bytes, cipher: Any = None) -> Any:
     """Decrypt, decompress, and deserialize payload with automatic algorithm detection."""
+    t0 = time.perf_counter()
     if len(encrypted_blob) < 5:
         raise ValueError("Encrypted payload too short.")
 
@@ -346,7 +357,14 @@ def decrypt_and_unpack(encrypted_blob: bytes, cipher: Any = None) -> Any:
     else:
         raw_bytes = decrypted
 
-    return serializers.loads(raw_bytes)
+    result = serializers.loads(raw_bytes)
+    try:
+        from .metrics import metrics
+        metrics.record_latency("decrypt", time.perf_counter() - t0)
+    except Exception:
+        pass
+
+    return result
 
 
 from .bloom_filter import BloomFilter
@@ -495,6 +513,12 @@ def kv_get(key: str, default: Any = None) -> Any:
         return default
 
     try:
+        from .metrics import metrics
+        metrics.record_operation("read")
+    except Exception:
+        pass
+
+    try:
         return decrypt_and_unpack(row["value"])
     except Exception as e:
         print(f"[Database] Error decrypting kv '{key}': {e}")
@@ -523,6 +547,11 @@ def kv_set(key: str, data: Any, ttl: int | float | None = None):
         _update_blind_indexes(conn, key, data)
 
     bloom.add(key)
+    try:
+        from .metrics import metrics
+        metrics.record_operation("write")
+    except Exception:
+        pass
     try:
         from .events import events
         events.emit("write", key=key, value=data)
@@ -615,6 +644,12 @@ def kv_set_versioned(key: str, data: Any, expected_version: int, ttl: int | floa
             new_ver = expected_version + 1
 
     try:
+        from .metrics import metrics
+        metrics.record_operation("write")
+    except Exception:
+        pass
+
+    try:
         from .events import events
         events.emit("write", key=key, value=data)
     except Exception:
@@ -632,6 +667,11 @@ def kv_delete(key: str) -> bool:
         cur = conn.execute("DELETE FROM kv_store WHERE key = ?", (key,))
         deleted = cur.rowcount > 0
         if deleted:
+            try:
+                from .metrics import metrics
+                metrics.record_operation("delete")
+            except Exception:
+                pass
             try:
                 from .events import events
                 events.emit("delete", key=key)
@@ -816,6 +856,12 @@ def kv_mset(mapping: dict[str, Any], ttl: int | float | None = None):
             _update_blind_indexes(conn, key, data)
 
     try:
+        from .metrics import metrics
+        metrics.record_operation("write", count=len(mapping))
+    except Exception:
+        pass
+
+    try:
         from .events import events
         for key, data in mapping.items():
             events.emit("write", key=key, value=data)
@@ -843,6 +889,12 @@ def purge_expired_records() -> int:
         conn.execute("DELETE FROM blind_indexes WHERE key IN (SELECT key FROM kv_store WHERE expires_at > 0 AND expires_at <= ?)", (now_ts,))
         cur = conn.execute("DELETE FROM kv_store WHERE expires_at > 0 AND expires_at <= ?", (now_ts,))
         
+        try:
+            from .metrics import metrics
+            metrics.record_operation("purge", count=cur.rowcount)
+        except Exception:
+            pass
+
         try:
             from .events import events
             for k in expired_keys:
@@ -968,6 +1020,12 @@ def rotate_encryption_key(old_key: str | bytes, new_key: str | bytes) -> dict:
 
     # Update active in-memory cipher keys
     set_cipher_key(new_key)
+
+    try:
+        from .metrics import metrics
+        metrics.record_operation("rotate")
+    except Exception:
+        pass
 
     return {
         "status": "ok",

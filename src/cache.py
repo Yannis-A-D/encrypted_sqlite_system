@@ -95,8 +95,18 @@ class TwoTierCache:
             val, hit = self._adapter.get(key)
             if hit:
                 self._hits += 1
+                try:
+                    from .metrics import metrics
+                    metrics.record_cache_hit()
+                except Exception:
+                    pass
                 return val
             self._misses += 1
+            try:
+                from .metrics import metrics
+                metrics.record_cache_miss()
+            except Exception:
+                pass
 
         # 2. L1 Miss -> Fetch from L2 (Encrypted SQLite)
         from .database import kv_get

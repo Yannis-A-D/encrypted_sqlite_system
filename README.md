@@ -617,6 +617,35 @@ encrypted-sqlite metrics --serve --port 9108
 
 # Or in the interactive shell:
 encrypted-sqlite> metrics
+---
+
+### 20. Atomic Multi-Key Transaction Manager (`with cache.transaction():`)
+
+Atomic multi-document transactions across both L1 memory cache and L2 SQLite with **Read-Your-Own-Writes** and automatic rollback on failure:
+
+```python
+from src import cache, transaction, async_transaction
+
+# 1. Synchronous Multi-Key Atomic Transaction
+with cache.transaction() as tx:
+    # Read current state
+    alice_wallet = tx.get("wallet:alice", default={"balance": 100})
+    bob_wallet = tx.get("wallet:bob", default={"balance": 50})
+
+    # Stage transfer
+    tx.set("wallet:alice", {"balance": alice_wallet["balance"] - 25})
+    tx.set("wallet:bob", {"balance": bob_wallet["balance"] + 25})
+    tx.delete("pending_transfer:123")
+
+    # Read-Your-Own-Writes: reads immediately reflect staged modifications
+    assert tx.get("wallet:alice")["balance"] == 75
+
+    # If any exception is raised here, all staged writes/deletes roll back cleanly!
+
+# 2. Asynchronous Transaction Support
+async with async_transaction() as tx:
+    await tx.set("user:101", {"status": "verified"})
+    await tx.set("audit:log:101", {"action": "verify", "ts": 1725577200})
 ```
 
 ---

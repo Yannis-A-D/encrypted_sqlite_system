@@ -249,6 +249,18 @@ class TwoTierCache:
         from .events import events
         return events.off(event, callback)
 
+    def transaction(self):
+        """
+        Create an atomic multi-key transaction context across L1 RAM and L2 SQLite:
+
+            with cache.transaction() as tx:
+                tx.set("user_1.json", {"name": "Alice"})
+                tx.set("user_2.json", {"name": "Bob"})
+                tx.delete("user_old.json")
+        """
+        from .transaction import Transaction
+        return Transaction(cache_instance=self)
+
 
 # Global Two-Tier Cache Singleton Instance
 cache = TwoTierCache(max_l1_items=1000, default_ttl_seconds=3600.0 * 24)

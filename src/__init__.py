@@ -55,6 +55,7 @@ from .bloom_filter import BloomFilter
 from .cloud_sync import CloudSyncEngine, cloud_sync
 from .events import events, EventDispatcher, ChangeEvent
 from .metrics import metrics, MetricsCollector, start_metrics_server
+from .transaction import Transaction, AsyncTransaction, transaction, async_transaction
 from . import serializers
 
 __version__ = "1.0.0"
@@ -119,5 +120,9 @@ __all__ = [
     "metrics",
     "MetricsCollector",
     "start_metrics_server",
+    "Transaction",
+    "AsyncTransaction",
+    "transaction",
+    "async_transaction",
     "serializers",
 ]

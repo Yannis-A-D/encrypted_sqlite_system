@@ -74,7 +74,7 @@ class Transaction:
         from .database import (
             get_db_connection,
             pack_and_encrypt,
-            _update_blind_indexes,
+            _upsert_kv_batch,
             bloom,
             init_db,
             ConcurrentModificationError
@@ -101,10 +101,12 @@ class Transaction:
 
         # Prepare batch writes
         batch_records = []
+        raw_items = []
         for key, (data, ttl) in self._staged_writes.items():
-            encrypted_blob = pack_and_encrypt(data)
+            encrypted_blob = pack_and_encrypt(data, associated_data=key.encode("utf-8"))
             expires_at = int(now_ts + ttl) if (ttl is not None and ttl > 0) else 0
             batch_records.append((key, encrypted_blob, expires_at, now_ts))
+            raw_items.append((key, data))
 
         # Single atomic SQL transaction
         with conn:
@@ -114,17 +116,7 @@ class Transaction:
                 conn.executemany("DELETE FROM kv_store WHERE key = ?", [(k,) for k in delete_keys])
 
             if batch_records:
-                conn.executemany("""
-                    INSERT INTO kv_store (key, value, version, expires_at, updated_at)
-                    VALUES (?, ?, 1, ?, ?)
-                    ON CONFLICT(key) DO UPDATE SET
-                        value = excluded.value,
-                        version = version + 1,
-                        expires_at = excluded.expires_at,
-                        updated_at = excluded.updated_at;
-                """, batch_records)
-                for key, (data, _) in self._staged_writes.items():
-                    _update_blind_indexes(conn, key, data)
+                _upsert_kv_batch(conn, batch_records, raw_items)
 
         # Synchronize L1 RAM cache and Bloom Filter
         for key in self._staged_deletes:

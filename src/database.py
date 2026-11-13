@@ -37,6 +37,12 @@ except ImportError:
     _zstd_compressor = None
     _zstd_decompressor = None
 
+try:
+    import argon2.low_level
+    _HAS_ARGON2 = True
+except ImportError:
+    _HAS_ARGON2 = False
+
 class ConcurrentModificationError(Exception):
     """Raised when a concurrent write occurs and version numbers do not match."""
     pass
@@ -104,13 +110,41 @@ def get_or_create_db_salt() -> bytes:
     return salt
 
 
-def derive_key_from_passphrase(passphrase: str, salt: bytes | None = None) -> tuple[bytes, bytes]:
+def derive_key_from_passphrase(
+    passphrase: str,
+    salt: bytes | None = None,
+    algorithm: str | None = None
+) -> tuple[bytes, bytes]:
     """
-    Derive a 256-bit encryption key from a human passphrase using PBKDF2-HMAC-SHA256 (600,000 rounds).
+    Derive a 256-bit encryption key from a human passphrase.
+    Supports Argon2id (memory-hard, recommended) or PBKDF2-HMAC-SHA256 (600,000 rounds).
     Returns (raw_32_bytes, salt).
     """
     if salt is None:
         salt = get_or_create_db_salt()
+
+    chosen_algo = (algorithm or os.getenv("KDF_ALGORITHM", "AUTO")).upper()
+    if chosen_algo == "AUTO":
+        chosen_algo = "ARGON2ID" if _HAS_ARGON2 else "PBKDF2"
+
+    if chosen_algo == "ARGON2ID":
+        if not _HAS_ARGON2:
+            import warnings
+            warnings.warn("Argon2id requested but argon2-cffi is not installed. Falling back to PBKDF2-HMAC-SHA256.")
+            chosen_algo = "PBKDF2"
+        else:
+            key_material = argon2.low_level.hash_secret_raw(
+                secret=passphrase.encode("utf-8"),
+                salt=salt,
+                time_cost=2,
+                memory_cost=65536,
+                parallelism=4,
+                hash_len=32,
+                type=argon2.low_level.Type.ID
+            )
+            return key_material, salt
+
+    # PBKDF2-HMAC-SHA256 (600,000 rounds)
     kdf = PBKDF2HMAC(
         algorithm=hashes.SHA256(),
         length=32,
@@ -119,6 +153,14 @@ def derive_key_from_passphrase(passphrase: str, salt: bytes | None = None) -> tu
     )
     key_material = kdf.derive(passphrase.encode("utf-8"))
     return key_material, salt
+
+
+def get_active_kdf_algorithm() -> str:
+    """Get the currently configured or active KDF algorithm ('ARGON2ID' or 'PBKDF2')."""
+    env_algo = os.getenv("KDF_ALGORITHM", "AUTO").upper()
+    if env_algo == "AUTO":
+        return "ARGON2ID" if _HAS_ARGON2 else "PBKDF2"
+    return env_algo
 
 
 def set_cipher_passphrase(passphrase: str, salt: bytes | None = None):
@@ -162,6 +204,13 @@ def _get_raw_key_material() -> bytes:
     """Retrieve raw 32 bytes of the active master key."""
     raw_key = os.getenv("ENCRYPTION_KEY")
     if not raw_key:
+        try:
+            from .keyring_manager import KeyManager
+            raw_key = KeyManager.get_master_key()
+        except Exception:
+            raw_key = None
+
+    if not raw_key:
         key_file = ROOT_DIR / "secret.key"
         if key_file.exists():
             raw_key = key_file.read_text().strip()
@@ -194,21 +243,6 @@ def _get_ciphers() -> tuple[AESGCM, Fernet]:
     global _cipher_aesgcm, _cipher_fernet, _cipher_chacha
     if _cipher_aesgcm is not None and _cipher_fernet is not None:
         return _cipher_aesgcm, _cipher_fernet
-
-    raw_key = os.getenv("ENCRYPTION_KEY")
-    if not raw_key:
-        key_file = ROOT_DIR / "secret.key"
-        if key_file.exists():
-            raw_key = key_file.read_text().strip()
-        else:
-            raw_key_bytes = AESGCM.generate_key(bit_length=256)
-            new_key = base64.urlsafe_b64encode(raw_key_bytes).decode("utf-8")
-            key_file.write_text(new_key)
-            raw_key = new_key
-            print(f"[Database] Generated new encryption key and saved to {key_file.name}")
-
-    if isinstance(raw_key, str):
-        raw_key = raw_key.encode("utf-8")
 
     key_material = _get_raw_key_material()
 
@@ -356,7 +390,7 @@ def _update_blind_indexes(conn, key: str, data: Any, custom_derived_key: bytes |
 from . import serializers
 
 
-def pack_and_encrypt(data: Any, cipher: Any = None) -> bytes:
+def pack_and_encrypt(data: Any, cipher: Any = None, associated_data: bytes | None = None) -> bytes:
     """Serialize, compress, encrypt, and prefix with algorithm identifier."""
     t0 = time.perf_counter()
     raw_bytes = serializers.dumps(data)
@@ -375,11 +409,11 @@ def pack_and_encrypt(data: Any, cipher: Any = None) -> bytes:
     if cipher is not None:
         if isinstance(cipher, AESGCM):
             nonce = os.urandom(12)
-            ciphertext = cipher.encrypt(nonce, payload, associated_data=None)
+            ciphertext = cipher.encrypt(nonce, payload, associated_data=associated_data)
             res = _PREFIX_GCM + nonce + ciphertext
         elif isinstance(cipher, ChaCha20Poly1305):
             nonce = os.urandom(12)
-            ciphertext = cipher.encrypt(nonce, payload, associated_data=None)
+            ciphertext = cipher.encrypt(nonce, payload, associated_data=associated_data)
             res = _PREFIX_CHACHA + nonce + ciphertext
         elif isinstance(cipher, Fernet):
             ciphertext = cipher.encrypt(payload)
@@ -397,12 +431,12 @@ def pack_and_encrypt(data: Any, cipher: Any = None) -> bytes:
         elif algo in ("CHACHA20-POLY1305", "CHACHA20", "XCHACHA20-POLY1305"):
             chacha = _get_chacha_cipher()
             nonce = os.urandom(12)
-            ciphertext = chacha.encrypt(nonce, payload, associated_data=None)
+            ciphertext = chacha.encrypt(nonce, payload, associated_data=associated_data)
             res = _PREFIX_CHACHA + nonce + ciphertext
         else:
             # Default to AES-256-GCM
             nonce = os.urandom(12)
-            ciphertext = aesgcm_cipher.encrypt(nonce, payload, associated_data=None)
+            ciphertext = aesgcm_cipher.encrypt(nonce, payload, associated_data=associated_data)
             res = _PREFIX_GCM + nonce + ciphertext
 
     try:
@@ -414,7 +448,7 @@ def pack_and_encrypt(data: Any, cipher: Any = None) -> bytes:
     return res
 
 
-def decrypt_and_unpack(encrypted_blob: bytes, cipher: Any = None) -> Any:
+def decrypt_and_unpack(encrypted_blob: bytes, cipher: Any = None, associated_data: bytes | None = None) -> Any:
     """Decrypt, decompress, and deserialize payload with automatic algorithm detection."""
     t0 = time.perf_counter()
     if len(encrypted_blob) < 5:
@@ -437,13 +471,13 @@ def decrypt_and_unpack(encrypted_blob: bytes, cipher: Any = None) -> Any:
                 raise ValueError("Payload missing GCM nonce.")
             nonce = actual_blob[:12]
             ciphertext = actual_blob[12:]
-            decrypted = cipher.decrypt(nonce, ciphertext, associated_data=None)
+            decrypted = cipher.decrypt(nonce, ciphertext, associated_data=associated_data)
         elif isinstance(cipher, ChaCha20Poly1305):
             if len(actual_blob) < 12:
                 raise ValueError("Payload missing ChaCha20 nonce.")
             nonce = actual_blob[:12]
             ciphertext = actual_blob[12:]
-            decrypted = cipher.decrypt(nonce, ciphertext, associated_data=None)
+            decrypted = cipher.decrypt(nonce, ciphertext, associated_data=associated_data)
         elif isinstance(cipher, Fernet):
             decrypted = cipher.decrypt(actual_blob)
         else:
@@ -458,7 +492,7 @@ def decrypt_and_unpack(encrypted_blob: bytes, cipher: Any = None) -> Any:
                 raise ValueError("Payload missing GCM nonce.")
             nonce = actual_blob[:12]
             ciphertext = actual_blob[12:]
-            decrypted = aesgcm_cipher.decrypt(nonce, ciphertext, associated_data=None)
+            decrypted = aesgcm_cipher.decrypt(nonce, ciphertext, associated_data=associated_data)
         elif encrypted_blob.startswith(_PREFIX_CHACHA):
             actual_blob = encrypted_blob[5:]
             if len(actual_blob) < 12:
@@ -466,7 +500,7 @@ def decrypt_and_unpack(encrypted_blob: bytes, cipher: Any = None) -> Any:
             nonce = actual_blob[:12]
             ciphertext = actual_blob[12:]
             chacha = _get_chacha_cipher()
-            decrypted = chacha.decrypt(nonce, ciphertext, associated_data=None)
+            decrypted = chacha.decrypt(nonce, ciphertext, associated_data=associated_data)
         elif encrypted_blob.startswith(_PREFIX_FERNET):
             actual_blob = encrypted_blob[5:]
             decrypted = fernet_cipher.decrypt(actual_blob)
@@ -484,7 +518,7 @@ def decrypt_and_unpack(encrypted_blob: bytes, cipher: Any = None) -> Any:
                         raise ValueError("Payload missing GCM nonce.")
                     nonce = encrypted_blob[:12]
                     ciphertext = encrypted_blob[12:]
-                    decrypted = aesgcm_cipher.decrypt(nonce, ciphertext, associated_data=None)
+                    decrypted = aesgcm_cipher.decrypt(nonce, ciphertext, associated_data=associated_data)
         else:
             # Fallback to default algorithm if no matching prefix
             algo = get_active_algorithm()
@@ -495,7 +529,7 @@ def decrypt_and_unpack(encrypted_blob: bytes, cipher: Any = None) -> Any:
                     raise ValueError("Payload missing GCM nonce.")
                 nonce = encrypted_blob[:12]
                 ciphertext = encrypted_blob[12:]
-                decrypted = aesgcm_cipher.decrypt(nonce, ciphertext, associated_data=None)
+                decrypted = aesgcm_cipher.decrypt(nonce, ciphertext, associated_data=associated_data)
 
     # Decompress and deserialize
     if decrypted.startswith(_MAGIC_COMPRESSED_ZSTD):
@@ -652,30 +686,31 @@ def init_db():
 
 # ─── Key-Value Store Operations ───────────────────────────────────────────────
 
-def kv_get(key: str, default: Any = None) -> Any:
-    """Retrieve, decrypt, and decompress a JSON document from kv_store with TTL check."""
+def kv_get_with_expiry(key: str, default: Any = None) -> tuple[Any, float | None]:
+    """Retrieve decrypted document alongside its expiration timestamp (or None)."""
     init_db()
 
     # Fast Bloom filter check: if definitely not in database, return 0-disk miss immediately
     if not bloom.contains(key):
-        return default
+        return default, None
 
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT value, expires_at FROM kv_store WHERE key = ?", (key,))
     row = cursor.fetchone()
     if row is None:
-        return default
+        return default, None
 
     # Check database-level TTL
     import time
     now_ts = int(time.time())
-    if row["expires_at"] > 0 and row["expires_at"] <= now_ts:
+    expires_at = row["expires_at"]
+    if expires_at > 0 and expires_at <= now_ts:
         try:
             kv_delete(key)
         except Exception:
             pass
-        return default
+        return default, None
 
     try:
         from .metrics import metrics
@@ -684,34 +719,53 @@ def kv_get(key: str, default: Any = None) -> Any:
         pass
 
     try:
-        return decrypt_and_unpack(row["value"])
+        data = decrypt_and_unpack(row["value"], associated_data=key.encode("utf-8"))
+        return data, (float(expires_at) if expires_at > 0 else None)
     except Exception as e:
         print(f"[Database] Error decrypting kv '{key}': {e}")
-        return default
+        return default, None
+
+
+def kv_get(key: str, default: Any = None) -> Any:
+    """Retrieve, decrypt, and decompress a JSON document from kv_store with TTL check."""
+    data, _ = kv_get_with_expiry(key, default=default)
+    return data
+
+
+def _upsert_kv_batch(
+    conn: sqlite3.Connection,
+    batch_records: list[tuple[str, bytes, int, int]],
+    raw_items: list[tuple[str, Any]],
+):
+    """Shared atomic upsert for kv_store, blind_indexes, and bloom filter."""
+    if not batch_records:
+        return
+    conn.executemany("""
+        INSERT INTO kv_store (key, value, version, expires_at, updated_at)
+        VALUES (?, ?, 1, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET
+            value = excluded.value,
+            version = version + 1,
+            expires_at = excluded.expires_at,
+            updated_at = excluded.updated_at;
+    """, batch_records)
+    for key, data in raw_items:
+        _update_blind_indexes(conn, key, data)
+        bloom.add(key)
 
 
 def kv_set(key: str, data: Any, ttl: int | float | None = None):
     """Compress, encrypt, and store any Python dict/list into kv_store with optional TTL (seconds)."""
     init_db()
     conn = get_db_connection()
-    encrypted_blob = pack_and_encrypt(data)
+    encrypted_blob = pack_and_encrypt(data, associated_data=key.encode("utf-8"))
     import time
     now_ts = int(time.time())
     expires_at = int(now_ts + ttl) if (ttl is not None and ttl > 0) else 0
 
     with conn:
-        conn.execute("""
-            INSERT INTO kv_store (key, value, version, expires_at, updated_at)
-            VALUES (?, ?, 1, ?, ?)
-            ON CONFLICT(key) DO UPDATE SET
-                value = excluded.value,
-                version = version + 1,
-                expires_at = excluded.expires_at,
-                updated_at = excluded.updated_at;
-        """, (key, encrypted_blob, expires_at, now_ts))
-        _update_blind_indexes(conn, key, data)
+        _upsert_kv_batch(conn, [(key, encrypted_blob, expires_at, now_ts)], [(key, data)])
 
-    bloom.add(key)
     try:
         from .metrics import metrics
         metrics.record_operation("write")
@@ -749,7 +803,7 @@ def kv_get_versioned(key: str, default: Any = None) -> tuple[Any, int]:
         return default, 0
 
     try:
-        data = decrypt_and_unpack(row["value"])
+        data = decrypt_and_unpack(row["value"], associated_data=key.encode("utf-8"))
         return data, row["version"]
     except Exception as e:
         print(f"[Database] Error decrypting versioned kv '{key}': {e}")
@@ -764,7 +818,7 @@ def kv_set_versioned(key: str, data: Any, expected_version: int, ttl: int | floa
     """
     init_db()
     conn = get_db_connection()
-    encrypted_blob = pack_and_encrypt(data)
+    encrypted_blob = pack_and_encrypt(data, associated_data=key.encode("utf-8"))
     import time
     now_ts = int(time.time())
     expires_at = int(now_ts + ttl) if (ttl is not None and ttl > 0) else 0
@@ -985,7 +1039,7 @@ def kv_mget(keys: list[str]) -> dict[str, Any]:
         from concurrent.futures import ThreadPoolExecutor
         def _decrypt_item(row):
             try:
-                return row["key"], decrypt_and_unpack(row["value"])
+                return row["key"], decrypt_and_unpack(row["value"], associated_data=row["key"].encode("utf-8"))
             except Exception:
                 return row["key"], None
 
@@ -996,7 +1050,7 @@ def kv_mget(keys: list[str]) -> dict[str, Any]:
     else:
         for row in active_rows:
             try:
-                results[row["key"]] = decrypt_and_unpack(row["value"])
+                results[row["key"]] = decrypt_and_unpack(row["value"], associated_data=row["key"].encode("utf-8"))
             except Exception:
                 pass
 
@@ -1017,25 +1071,14 @@ def kv_mset(mapping: dict[str, Any], ttl: int | float | None = None):
     expires_at = int(now_ts + ttl) if (ttl is not None and ttl > 0) else 0
 
     batch_records = []
+    raw_items = []
     for key, data in mapping.items():
-        encrypted_blob = pack_and_encrypt(data)
+        encrypted_blob = pack_and_encrypt(data, associated_data=key.encode("utf-8"))
         batch_records.append((key, encrypted_blob, expires_at, now_ts))
-        bloom.add(key)
+        raw_items.append((key, data))
 
     with conn:
-        conn.executemany("""
-            INSERT INTO kv_store (key, value, version, expires_at, updated_at)
-            VALUES (?, ?, 1, ?, ?)
-            ON CONFLICT(key) DO UPDATE SET
-                value = excluded.value,
-                version = version + 1,
-                expires_at = excluded.expires_at,
-                updated_at = excluded.updated_at;
-        """, batch_records)
-        
-        # Update blind indexes for each document in the batch
-        for key, data in mapping.items():
-            _update_blind_indexes(conn, key, data)
+        _upsert_kv_batch(conn, batch_records, raw_items)
 
     try:
         from .metrics import metrics
@@ -1123,10 +1166,11 @@ class TTLScavenger:
 scavenger = TTLScavenger(interval_seconds=60.0)
 
 
-def rotate_encryption_key(old_key: str | bytes, new_key: str | bytes) -> dict:
+def rotate_encryption_key(old_key: str | bytes, new_key: str | bytes, strict: bool = False) -> dict:
     """
     Re-encrypt all records in SQLite using a new encryption key atomically.
     Guarantees zero data loss with full rollback on error.
+    When strict=True, raises RuntimeError if any record fails to decrypt.
     """
     init_db()
     if isinstance(old_key, str):
@@ -1168,42 +1212,58 @@ def rotate_encryption_key(old_key: str | bytes, new_key: str | bytes) -> dict:
     rows = cursor.fetchall()
 
     re_encrypted_records = []
+    failed_keys = []
     for row in rows:
         key = row["key"]
         old_blob = row["value"]
         ver = row["version"]
         exp = row["expires_at"]
         ts = row["updated_at"]
+        aad = key.encode("utf-8")
         try:
             # Decrypt: auto-detect prefix/type and decrypt with the correct cipher
+            def _decrypt_for_rotation(blob: bytes, c: Any, use_aad: bytes | None) -> Any:
+                return decrypt_and_unpack(blob, cipher=c, associated_data=use_aad)
+
             if old_blob.startswith(_PREFIX_GCM):
-                data = decrypt_and_unpack(old_blob, cipher=old_aesgcm)
+                try:
+                    data = _decrypt_for_rotation(old_blob, old_aesgcm, aad)
+                except InvalidTag:
+                    data = _decrypt_for_rotation(old_blob, old_aesgcm, None)
             elif old_blob.startswith(_PREFIX_CHACHA):
-                data = decrypt_and_unpack(old_blob, cipher=old_chacha)
+                try:
+                    data = _decrypt_for_rotation(old_blob, old_chacha, aad)
+                except InvalidTag:
+                    data = _decrypt_for_rotation(old_blob, old_chacha, None)
             elif old_blob.startswith(_PREFIX_FERNET) or old_blob.startswith(b"gAAAA") or (len(old_blob) > 0 and old_blob[0] == 0x80):
-                data = decrypt_and_unpack(old_blob, cipher=old_fernet)
+                data = _decrypt_for_rotation(old_blob, old_fernet, None)
             else:
                 # Try GCM, ChaCha, then Fernet
                 try:
-                    data = decrypt_and_unpack(old_blob, cipher=old_aesgcm)
+                    data = _decrypt_for_rotation(old_blob, old_aesgcm, aad)
                 except Exception:
                     try:
-                        data = decrypt_and_unpack(old_blob, cipher=old_chacha)
+                        data = _decrypt_for_rotation(old_blob, old_chacha, aad)
                     except Exception:
-                        data = decrypt_and_unpack(old_blob, cipher=old_fernet)
+                        data = _decrypt_for_rotation(old_blob, old_fernet, None)
 
             # Encrypt with new key using active algorithm
             algo = get_active_algorithm()
             if algo == "AES-128-FERNET":
                 new_blob = pack_and_encrypt(data, cipher=new_fernet)
             elif algo in ("CHACHA20-POLY1305", "CHACHA20", "XCHACHA20-POLY1305"):
-                new_blob = pack_and_encrypt(data, cipher=new_chacha)
+                new_blob = pack_and_encrypt(data, cipher=new_chacha, associated_data=aad)
             else:
-                new_blob = pack_and_encrypt(data, cipher=new_aesgcm)
+                new_blob = pack_and_encrypt(data, cipher=new_aesgcm, associated_data=aad)
 
             re_encrypted_records.append((key, new_blob, ver, exp, ts, data))
-        except Exception:
-            continue
+        except Exception as e:
+            failed_keys.append(key)
+            if strict:
+                raise RuntimeError(f"Key rotation aborted: failed to decrypt record '{key}': {e}") from e
+
+    if failed_keys:
+        print(f"[Database] Key rotation warning: {len(failed_keys)} record(s) could not be decrypted with the old key.")
 
     # Derive new index key for rotation using HKDF
     new_idx_key = derive_indexing_key(new_key_raw)
@@ -1232,6 +1292,8 @@ def rotate_encryption_key(old_key: str | bytes, new_key: str | bytes) -> dict:
     return {
         "status": "ok",
         "rotated_count": len(re_encrypted_records),
+        "failed_count": len(failed_keys),
+        "failed_keys": failed_keys,
         "message": f"Successfully rotated encryption key for {len(re_encrypted_records)} records."
     }
 
@@ -1258,10 +1320,3 @@ def db_maintenance() -> dict:
         stats["status"] = f"error: {e}"
         print(f"[Database] Maintenance error: {e}")
     return stats
-
-
-# Auto-initialize on module load
-try:
-    init_db()
-except Exception as _e:
-    print(f"[Database] Init warning: {_e}")

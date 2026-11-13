@@ -14,11 +14,10 @@ from pathlib import Path
 from typing import Any
 from cryptography.exceptions import InvalidTag
 from cryptography.fernet import InvalidToken
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM, ChaCha20Poly1305
 from .database import (
-    _get_cipher, _get_ciphers, get_active_algorithm, DATA_DIR,
-    _PREFIX_GCM, _PREFIX_FERNET
+    _get_cipher, _get_ciphers, _get_chacha_cipher, get_active_algorithm, DATA_DIR,
+    _PREFIX_GCM, _PREFIX_FERNET, _PREFIX_CHACHA
 )
 from .cache import cache
 
@@ -57,6 +56,15 @@ def load_json(path: str | Path, default: Any = _DEFAULT_UNSET) -> Any:
     if not raw:
         return fallback
 
+    is_encrypted_prefix = (
+        raw.startswith(_PREFIX_GCM)
+        or raw.startswith(_PREFIX_FERNET)
+        or raw.startswith(_PREFIX_CHACHA)
+        or raw[0] == 0x80
+        or raw.startswith(b"gAAAA")
+    )
+    aad = key_name.encode("utf-8")
+
     # Try decryption first
     try:
         decrypted = None
@@ -67,7 +75,15 @@ def load_json(path: str | Path, default: Any = _DEFAULT_UNSET) -> Any:
                 raise ValueError("Missing GCM nonce.")
             nonce = actual_blob[:12]
             ciphertext = actual_blob[12:]
-            decrypted = cipher_gcm.decrypt(nonce, ciphertext, associated_data=None)
+            decrypted = cipher_gcm.decrypt(nonce, ciphertext, associated_data=aad)
+        elif raw.startswith(_PREFIX_CHACHA):
+            chacha = _get_chacha_cipher()
+            actual_blob = raw[5:]
+            if len(actual_blob) < 12:
+                raise ValueError("Missing ChaCha20 nonce.")
+            nonce = actual_blob[:12]
+            ciphertext = actual_blob[12:]
+            decrypted = chacha.decrypt(nonce, ciphertext, associated_data=aad)
         elif raw.startswith(_PREFIX_FERNET):
             _, cipher_fernet = _get_ciphers()
             actual_blob = raw[5:]
@@ -79,22 +95,26 @@ def load_json(path: str | Path, default: Any = _DEFAULT_UNSET) -> Any:
         else:
             # Fallback to active cipher
             cipher_active = _get_cipher()
-            if isinstance(cipher_active, AESGCM):
+            if isinstance(cipher_active, (AESGCM, ChaCha20Poly1305)):
                 if len(raw) < 12:
-                    raise ValueError("Missing GCM nonce.")
+                    raise ValueError("Missing AEAD nonce.")
                 nonce = raw[:12]
                 ciphertext = raw[12:]
-                decrypted = cipher_active.decrypt(nonce, ciphertext, associated_data=None)
+                decrypted = cipher_active.decrypt(nonce, ciphertext, associated_data=aad)
             else:
                 decrypted = cipher_active.decrypt(raw)
 
         data = json.loads(decrypted)
         cache.set_l1_only(key_name, data)
         return data
-    except (InvalidTag, InvalidToken, Exception):
-        pass
+    except (InvalidTag, InvalidToken):
+        if is_encrypted_prefix:
+            return fallback
+    except Exception:
+        if is_encrypted_prefix:
+            return fallback
 
-    # Fall back to plain-text JSON (legacy files)
+    # Fall back to plain-text JSON only for unprefixed legacy files
     try:
         data = json.loads(raw.decode("utf-8"))
         cache.set_l1_only(key_name, data)
@@ -131,17 +151,23 @@ def save_json(path: str | Path, data: Any, indent: int = 2, ttl: float | None = 
 
     # 3. Atomic write to encrypted disk file for permanent backup safety
     plaintext = json.dumps(data, indent=indent, ensure_ascii=False).encode("utf-8")
-    
+    aad = key_name.encode("utf-8")
+
     algo = get_active_algorithm()
     if algo == "AES-128-FERNET":
         _, cipher_fernet = _get_ciphers()
         ciphertext = cipher_fernet.encrypt(plaintext)
         payload = _PREFIX_FERNET + ciphertext
+    elif algo in ("CHACHA20-POLY1305", "CHACHA20", "XCHACHA20-POLY1305"):
+        chacha = _get_chacha_cipher()
+        nonce = os.urandom(12)
+        ciphertext = chacha.encrypt(nonce, plaintext, associated_data=aad)
+        payload = _PREFIX_CHACHA + nonce + ciphertext
     else:
         # Default to AES-256-GCM
         cipher_gcm, _ = _get_ciphers()
         nonce = os.urandom(12)
-        ciphertext = cipher_gcm.encrypt(nonce, plaintext, associated_data=None)
+        ciphertext = cipher_gcm.encrypt(nonce, plaintext, associated_data=aad)
         payload = _PREFIX_GCM + nonce + ciphertext
 
     tmp = path.with_suffix(path.suffix + ".tmp")

@@ -1,12 +1,13 @@
 """
 Encrypted SQLite JSON & Two-Tier Caching Engine
-A high-performance, AES-128 encrypted, thread-safe SQLite & in-memory caching system for Python applications.
+A high-performance, AES-256-GCM / ChaCha20-Poly1305 / Fernet encrypted, thread-safe SQLite & in-memory caching system for Python applications.
 """
 
 from .database import (
     init_db,
     get_db_connection,
     kv_get,
+    kv_get_with_expiry,
     kv_set,
     kv_get_versioned,
     kv_set_versioned,
@@ -21,6 +22,8 @@ from .database import (
     get_indexed_fields,
     get_active_compression,
     set_active_compression,
+    get_active_kdf_algorithm,
+    derive_key_from_passphrase,
     kv_count,
     purge_expired_records,
     scavenger,
@@ -29,6 +32,8 @@ from .database import (
     db_maintenance,
     bloom,
 )
+from .keyring_manager import KeyManager
+from .ttl_reaper import TTLReaper, start_ttl_reaper, stop_ttl_reaper, get_ttl_reaper
 from .cache import TwoTierCache, cache
 from .secure_json import load_json, save_json
 from .masking import mask_pii, mask_sensitive

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "encrypted-sqlite-system"
 version = "1.0.0"
-description = "High-performance, AES-128 encrypted SQLite document store and Two-Tier (L1/L2) caching engine for Python."
+description = "High-performance, AES-256-GCM / ChaCha20-Poly1305 / Fernet encrypted SQLite document store and Two-Tier (L1/L2) caching engine for Python."
 readme = "README.md"
 authors = [
     { name = "Yannis-A-D" }
@@ -38,13 +38,18 @@ classifiers = [
 ]
 dependencies = [
     "cryptography>=42.0.0",
-    "zstandard>=0.22.0"
+    "zstandard>=0.22.0",
+    "rich>=13.0.0"
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0.0",
     "pytest-cov>=4.1.0"
+]
+security = [
+    "argon2-cffi>=23.1.0",
+    "keyring>=24.0.0"
 ]
 
 [project.scripts]

@@ -18,11 +18,7 @@ from cryptography.fernet import InvalidToken
 def compute_record_checksum(key: str, val_bytes: bytes, updated_at: int, secret_key: bytes | None = None) -> str:
     """Compute an HMAC-SHA256 signature for a database record."""
     if secret_key is None:
-        try:
-            secret_key = _get_integrity_key()
-        except Exception:
-            cipher = _get_cipher()
-            secret_key = cipher._signing_key if hasattr(cipher, "_signing_key") else b"default_secret_seed"
+        secret_key = _get_integrity_key()
 
     h = hmac.new(secret_key, digestmod=hashlib.sha256)
     h.update(key.encode("utf-8"))
@@ -43,7 +39,6 @@ def verify_database_integrity() -> dict[str, Any]:
     cursor.execute("SELECT key, value, updated_at FROM kv_store")
     rows = cursor.fetchall()
 
-    cipher = _get_cipher()
     total = len(rows)
     valid_count = 0
     corrupted_keys = []
@@ -51,11 +46,10 @@ def verify_database_integrity() -> dict[str, Any]:
     for row in rows:
         key = row["key"]
         val_blob = row["value"]
-        updated_at = row["updated_at"]
 
         try:
-            # 1. Cryptographic HMAC verification & Fernet AES decryption
-            data = decrypt_and_unpack(val_blob, cipher=cipher)
+            # Cryptographic AEAD tag / Fernet HMAC verification & decryption
+            data = decrypt_and_unpack(val_blob, associated_data=key.encode("utf-8"))
             if data is not None:
                 valid_count += 1
             else:

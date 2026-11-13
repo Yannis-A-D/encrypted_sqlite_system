@@ -64,8 +64,7 @@ class WriteBehindEngine:
         from .database import (
             get_db_connection,
             pack_and_encrypt,
-            _update_blind_indexes,
-            bloom,
+            _upsert_kv_batch,
         )
         conn = get_db_connection()
         now_ts = int(time.time())
@@ -79,7 +78,7 @@ class WriteBehindEngine:
             else:
                 val, ttl = entry, None
             try:
-                encrypted_blob = pack_and_encrypt(val)
+                encrypted_blob = pack_and_encrypt(val, associated_data=key.encode("utf-8"))
                 expires_at = int(now_ts + ttl) if (ttl is not None and ttl > 0) else 0
                 batch_records.append((key, encrypted_blob, expires_at, now_ts))
                 raw_items.append((key, val))
@@ -89,22 +88,7 @@ class WriteBehindEngine:
         # Atomic SQLite multi-row commit
         if batch_records:
             with conn:
-                conn.executemany("""
-                    INSERT INTO kv_store (key, value, version, expires_at, updated_at)
-                    VALUES (?, ?, 1, ?, ?)
-                    ON CONFLICT(key) DO UPDATE SET
-                        value = excluded.value,
-                        version = version + 1,
-                        expires_at = excluded.expires_at,
-                        updated_at = excluded.updated_at;
-                """, batch_records)
-
-                # Update blind indexes for all flushed items
-                for key, val in raw_items:
-                    _update_blind_indexes(conn, key, val)
-
-            for key, _, _, _ in batch_records:
-                bloom.add(key)
+                _upsert_kv_batch(conn, batch_records, raw_items)
 
             self._flushes_count += 1
             self._items_flushed_count += len(batch_records)

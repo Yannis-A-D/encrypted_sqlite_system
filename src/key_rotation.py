@@ -1,8 +1,9 @@
 import os
 import time
+import base64
 import threading
 from pathlib import Path
-from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from .database import rotate_encryption_key, ROOT_DIR
 
 class BackgroundKeyRotator:
@@ -65,8 +66,8 @@ class BackgroundKeyRotator:
             print(f"[KeyRotator] Error reading old key file: {e}")
             return False
         
-        # Generate new key
-        new_key_bytes = Fernet.generate_key()
+        # Generate new 256-bit key
+        new_key_bytes = base64.urlsafe_b64encode(AESGCM.generate_key(bit_length=256))
         new_key_str = new_key_bytes.decode("utf-8")
 
         # Perform re-encryption of all database records

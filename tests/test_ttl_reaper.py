@@ -46,9 +46,8 @@ class TestTTLReaperAndSync(unittest.TestCase):
         kv_set("expired_soon.json", {"foo": "bar"}, ttl=0.2)
         time.sleep(0.5)
 
-        # Trigger purge_now or wait for background sweep
-        purged = reaper.purge_now()
-        self.assertGreaterEqual(purged, 1)
+        # Trigger purge_now (background sweep may have already purged it)
+        reaper.purge_now()
         self.assertGreaterEqual(reaper.total_purged, 1)
 
         stop_ttl_reaper()

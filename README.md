@@ -130,7 +130,13 @@ sequenceDiagram
 The package includes a built-in `encrypted-sqlite` CLI command:
 
 ```bash
-# 1. Generate an AES-256 key
+# 1. Launch interactive Rich visual TUI dashboard
+encrypted-sqlite tui
+
+# 2. Run background TTL reaper daemon
+encrypted-sqlite reaper --interval 60
+
+# 3. Generate an AES-256 key
 encrypted-sqlite keygen
 
 # 2. Inspect database & cache telemetry

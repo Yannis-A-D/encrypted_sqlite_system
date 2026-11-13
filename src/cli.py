@@ -419,12 +419,48 @@ def cmd_shell(args):
             print(f"Error: {e}")
 
 
+def cmd_tui(args):
+    """Launch interactive Rich TUI dashboard."""
+    try:
+        from src.tui import run_tui
+        run_tui()
+    except ImportError:
+        from .tui import run_tui
+        run_tui()
+
+
+def cmd_reaper(args):
+    """Run foreground/background TTL reaper process."""
+    try:
+        from src.ttl_reaper import TTLReaper
+    except ImportError:
+        from .ttl_reaper import TTLReaper
+    import time
+    reaper = TTLReaper(interval_seconds=args.interval)
+    print(f"Starting TTL reaper daemon (interval: {args.interval}s)... Press Ctrl+C to stop.")
+    reaper.start()
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\nStopping TTL reaper daemon...")
+        reaper.stop()
+        print(f"Stopped. Total records purged: {reaper.total_purged}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="encrypted-sqlite",
         description="Encrypted SQLite JSON & Two-Tier Caching CLI Utility"
     )
     subparsers = parser.add_subparsers(dest="command", help="Available subcommands")
+
+    # tui
+    subparsers.add_parser("tui", help="Launch interactive Rich TUI visual dashboard")
+
+    # reaper
+    p_reap = subparsers.add_parser("reaper", help="Run background TTL reaper daemon")
+    p_reap.add_argument("--interval", "-i", type=float, default=60.0, help="Purge interval in seconds (default: 60.0)")
 
     # keygen
     subparsers.add_parser("keygen", help="Generate a new cryptographic AES-256 Fernet key")
@@ -514,6 +550,8 @@ def main():
         "purge-expired": cmd_purge_expired,
         "metrics": cmd_metrics,
         "shell": cmd_shell,
+        "tui": cmd_tui,
+        "reaper": cmd_reaper,
     }
 
     cmd_fn = dispatch.get(args.command)

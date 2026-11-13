@@ -108,12 +108,20 @@ class TwoTierCache:
             except Exception:
                 pass
 
-        # 2. L1 Miss -> Fetch from L2 (Encrypted SQLite)
-        from .database import kv_get
-        data = kv_get(key, default=None)
+        # 2. L1 Miss -> Fetch from L2 (Encrypted SQLite) with TTL synchronization
+        from .database import kv_get_with_expiry
+        data, expire_at = kv_get_with_expiry(key, default=None)
 
         if data is not None:
-            self.set_l1_only(key, data)
+            # Sync remaining TTL to L1 so L1 doesn't outlive SQLite TTL
+            remaining_l1_ttl = None
+            if expire_at is not None:
+                remaining = expire_at - time.time()
+                if remaining > 0:
+                    remaining_l1_ttl = remaining
+                else:
+                    return default
+            self.set_l1_only(key, data, ttl=remaining_l1_ttl)
             return data
 
         return default

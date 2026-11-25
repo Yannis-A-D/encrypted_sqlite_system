@@ -4,6 +4,9 @@ A high-performance, AES-256-GCM / ChaCha20-Poly1305 / Fernet encrypted, thread-s
 """
 
 from .engine import EncryptedSQLite
+from .collection import Collection
+from .envelope import EnvelopeKeyring, wrap_dek, unwrap_dek
+from .models import IntegrityReport, RotationReport, EngineStats
 from .database import (
     init_db,
     get_db_connection,
@@ -72,6 +75,13 @@ from . import serializers
 __version__ = "2.0.0"
 __all__ = [
     "EncryptedSQLite",
+    "Collection",
+    "EnvelopeKeyring",
+    "wrap_dek",
+    "unwrap_dek",
+    "IntegrityReport",
+    "RotationReport",
+    "EngineStats",
     "init_db",
     "get_db_connection",
     "close_all_connections",

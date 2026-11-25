@@ -12,6 +12,7 @@ import hmac
 import hashlib
 from typing import Any
 from .database import get_db_connection, decrypt_and_unpack, _get_cipher, _get_integrity_key
+from .models import IntegrityReport
 from cryptography.fernet import InvalidToken
 
 
@@ -27,12 +28,12 @@ def compute_record_checksum(key: str, val_bytes: bytes, updated_at: int, secret_
     return h.hexdigest()
 
 
-def verify_database_integrity() -> dict[str, Any]:
+def verify_database_integrity() -> IntegrityReport:
     """
     Perform a complete cryptographic integrity audit across all records in the database.
-    
+
     Returns:
-        dict containing total_records, valid_records, corrupted_records, and status.
+        IntegrityReport containing total_records, valid_records, corrupted_records, and status.
     """
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -41,7 +42,7 @@ def verify_database_integrity() -> dict[str, Any]:
 
     total = len(rows)
     valid_count = 0
-    corrupted_keys = []
+    corrupted_keys: list[dict[str, str]] = []
 
     for row in rows:
         stored_key = row["key"]
@@ -62,11 +63,11 @@ def verify_database_integrity() -> dict[str, Any]:
             corrupted_keys.append({"key": stored_key, "reason": f"Decryption/Decompression failed: {e}"})
 
     is_clean = len(corrupted_keys) == 0
-    return {
-        "status": "clean" if is_clean else "corrupted",
-        "total_records": total,
-        "valid_records": valid_count,
-        "corrupted_records": len(corrupted_keys),
-        "corrupted_keys": corrupted_keys,
-        "message": "All records passed 100% cryptographic integrity verification." if is_clean else f"Found {len(corrupted_keys)} corrupted/tampered records!"
-    }
+    return IntegrityReport(
+        status="clean" if is_clean else "corrupted",
+        total_records=total,
+        valid_records=valid_count,
+        corrupted_records=len(corrupted_keys),
+        corrupted_keys=corrupted_keys,
+        message="All records passed 100% cryptographic integrity verification." if is_clean else f"Found {len(corrupted_keys)} corrupted/tampered records!",
+    )

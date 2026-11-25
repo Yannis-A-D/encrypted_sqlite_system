@@ -1,7 +1,7 @@
 {
   "name": "encrypted-sqlite",
-  "version": "1.0.0",
-  "description": "High-speed AES-128 encrypted SQLite JSON storage & two-tier RAM caching CLI utility.",
+  "version": "2.0.0",
+  "description": "High-performance AES-256-GCM / ChaCha20-Poly1305 encrypted SQLite document store & two-tier caching CLI utility.",
   "main": "bin/cli.js",
   "bin": {
     "encrypted-sqlite": "./bin/cli.js"
@@ -17,7 +17,10 @@
     "sqlite",
     "sqlite3",
     "encrypted-sqlite",
-    "aes-128",
+    "aes-256-gcm",
+    "chacha20-poly1305",
+    "argon2id",
+    "envelope-encryption",
     "fernet",
     "lru-cache",
     "redis",

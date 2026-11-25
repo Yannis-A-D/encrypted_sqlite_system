@@ -251,17 +251,19 @@ def run_tui():
             console.print("[cyan]Auditing AEAD integrity tags and data checksums...[/cyan]")
             result = verify_database_integrity()
             status_style = "bold green" if result.get("corrupted_records", 0) == 0 else "bold red"
-            console.print(f"[{status_style}]Audit result: {result.get('status')} | Verified: {result.get('verified_records')}/{result.get('total_records')} records.[/{status_style}]")
+            console.print(f"[{status_style}]Audit result: {result.get('status')} | Verified: {result.get('valid_records')}/{result.get('total_records')} records.[/{status_style}]")
             Prompt.ask("\nPress [bold]Enter[/bold] to return to menu")
 
         elif choice == "8":
             console.print("[yellow]⚠️ Key rotation will re-encrypt all stored records.[/yellow]")
             if Confirm.ask("Do you want to proceed with atomic key rotation?"):
                 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+                from src.database import _get_raw_key_material
                 import base64
+                old_key = base64.urlsafe_b64encode(_get_raw_key_material()).decode("utf-8")
                 new_key = base64.urlsafe_b64encode(AESGCM.generate_key(bit_length=256)).decode("utf-8")
-                res = rotate_encryption_key(old_key=None, new_key=new_key)
-                console.print(f"[bold green]✅ Successfully re-encrypted {res.get('re_encrypted_count')} records.[/bold green]")
+                res = rotate_encryption_key(old_key=old_key, new_key=new_key)
+                console.print(f"[bold green]✅ Successfully re-encrypted {res.get('rotated_count')} records.[/bold green]")
                 console.print(f"[bold cyan]New Key:[/bold cyan] {new_key}")
             Prompt.ask("\nPress [bold]Enter[/bold] to return to menu")
 

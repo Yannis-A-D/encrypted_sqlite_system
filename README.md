@@ -8,21 +8,22 @@
 [![Database](https://img.shields.io/badge/storage-SQLite%20WAL-orange.svg)](https://sqlite.org/)
 [![License](https://img.shields.io/badge/license-MIT-purple.svg)](LICENSE)
 
-A high-performance, thread-safe, **AES-256-GCM / ChaCha20-Poly1305 encrypted SQLite document store and Two-Tier caching engine** for Python & Node.js applications, bots, and microservices. Run instantly with **Python** or zero-install via **`npx encrypted-sqlite`**!
+A high-performance, thread-safe, **AES-256-GCM / ChaCha20-Poly1305 encrypted SQLite document store and Two-Tier caching engine** for Python & Node.js applications, bots, and microservices. Run instantly with **Python** (`pip install encrypted-sqlite-system`) or zero-install via **`npx encrypted-sqlite`**!
 
 <p align="center">
-  <img src="assets/architecture_v2.png" alt="Encrypted SQLite System v2.0 Architecture" width="100%" />
+  <img src="assets/architecture_v3.png" alt="Encrypted SQLite System v3.0 Architecture" width="100%" />
 </p>
 
-Serves as a transparent, high-speed drop-in replacement for standard flat `.json` file storage with sub-millisecond memory caching and zero-lock concurrency.
+Serves as a transparent, high-speed drop-in replacement for standard flat `.json` file storage with sub-millisecond memory caching, multi-database isolation, typed `Collection[T]` schemas, and KEK/DEK envelope encryption.
 
 ---
 
 ## 🌟 Key Features
 
-* 🔒 **AES-256-GCM & ChaCha20-Poly1305 Authenticated Encryption**: AEAD encryption at rest with PBKDF2-HMAC-SHA256 passphrase derivation (600,000 rounds) and HKDF domain separation.
-* ⚡ **Two-Tier (L1/L2) Caching**: Sub-millisecond lookups with LRU RAM, in-memory Zstandard compression, and Redis support.
-* ☁️ **Zero-Knowledge Cloud Disaster Recovery**: Non-blocking live database backups with whole-file AES-GCM envelope encryption streamed to **Cloudflare R2**, **AWS S3**, **Backblaze B2**, or **MinIO**.
+* 🔒 **Two-Layer KEK/DEK Envelope & HKDF AEAD Encryption**: AES-256-GCM & ChaCha20-Poly1305 with HKDF-SHA256 subkey isolation, Argon2id/PBKDF2 KDF, multi-slot recovery passphrases, and **O(1) `< 1 ms` key rotation**.
+* 🧩 **Instantiable `EncryptedSQLite` & Typed `Collection[T]` API**: Open multiple isolated encrypted vaults per process with dataclass/Pydantic hydration, dot-path/array blind indexing, and optional `ENCK1:` Synthetic-IV key-name encryption.
+* ⚡ **Two-Tier (L1/L2) Caching & Auto-Scaling BLAKE2b Bloom Filter**: Copy-isolated LRU RAM, in-memory Zstandard compression, `ENC1:` AEAD-encrypted Redis L1, and FIPS-safe scalable Bloom filtering.
+* ☁️ **Zero-Knowledge Streaming Cloud Disaster Recovery**: Non-blocking live database backups with constant-memory `ENCSNAP1:CHK1:` 4 MiB chunked AES-GCM streaming to **Cloudflare R2**, **AWS S3**, **Backblaze B2**, or **MinIO**.
 * 🔍 **Fast Document Query & Wildcard Search**: Query encrypted documents with wildcard glob patterns (`kv_search`) or custom Python predicate filters (`kv_find`) with parallel multi-core decryption.
 * 🌊 **Asynchronous Write-Behind Batch Journaling**: Coalesces high-frequency writes in memory and flushes them to SQLite in bulk transactions (over **300,000 writes/sec**).
 * 🏎️ **Multi-Key Batch Operations & Parallel Decryption (`kv_mget` / `kv_mset`)**: Loads and saves multiple keys in a single SQL roundtrip with parallel multi-core CPU thread pool decryption.
@@ -661,24 +662,71 @@ async with async_transaction() as tx:
 
 ---
 
+### 21. Instantiable Vaults, Typed `Collection[T]` & KEK/DEK Envelope Encryption (v3.0)
+
+<p align="center">
+  <img src="assets/envelope_kek_dek.png" alt="Two-Layer KEK/DEK Envelope & HKDF Key Hierarchy" width="100%" />
+</p>
+
+Open isolated encrypted vaults with `EncryptedSQLite`, hydrate `@dataclass` or Pydantic schemas via `db.collection()`, encrypt primary key names (`encrypt_keys=True`), add offline recovery passphrases, and rotate KEKs in **O(1) `< 1 ms`**:
+
+```python
+from dataclasses import dataclass
+from encrypted_sqlite import EncryptedSQLite
+
+@dataclass
+class UserProfile:
+    username: str
+    email: str
+    roles: list[str]
+
+with EncryptedSQLite(
+    db_path="./vaults/users.db",
+    encrypt_keys=True,          # Synthetic-IV ENCK1: hides key names on disk
+    envelope_encryption=True,   # Two-layer KEK/DEK key wrapping
+) as db:
+    # 1. Typed Collection[T] with scoped dot-path & array blind indexes
+    users = db.collection("users", schema=UserProfile, indexes=["email", "roles"])
+    users.put("101", UserProfile("alex", "alex@example.com", ["admin", "dev"]))
+
+    admins = users.find_by("roles", "admin")  # Returns {"101": UserProfile(...)}
+
+    # 2. Add an offline emergency recovery passphrase slot
+    db.add_recovery_slot("offline_recovery", recovery_passphrase="correct-horse-battery-recovery")
+
+    # 3. O(1) instant KEK rotation (< 1 ms, zero row re-encryption required)
+    report = db.rotate_kek(new_key="your-new-32-byte-or-b64-key")
+    print(report.mode, report.status)  # kek_envelope_o1 ok
+```
+
+---
+
 ## 📁 Project Structure
 
 ```
 encrypted_sqlite_system/
+├── encrypted_sqlite/             # Canonical PEP 561 package namespace (py.typed)
 ├── src/
-│   ├── __init__.py         # Package entry point
-│   ├── database.py         # Encrypted SQLite engine & connection pool
-│   ├── cache.py            # Two-Tier L1 RAM + L2 SQLite caching engine
-│   └── secure_json.py      # Drop-in load_json / save_json API
-├── examples/
-│   └── quickstart_demo.py  # Interactive runnable demonstration
-├── data/                   # Encrypted app_database.db location
-├── generate_key.py         # Fernet key generator utility
-├── migrate.py              # Migrates existing flat JSON files to SQLite
-├── requirements.txt        # Python dependencies (cryptography)
-├── .gitignore              # Ignores secret keys and database binaries
-├── LICENSE                 # MIT Open-Source License
-└── README.md               # Documentation
+│   ├── __init__.py               # Package entry point
+│   ├── engine.py                 # Instantiable EncryptedSQLite vault engine
+│   ├── envelope.py               # Two-layer KEK/DEK multi-slot key wrapping
+│   ├── collection.py             # Typed Collection[T] & schema hydration
+│   ├── models.py                 # IntegrityReport, RotationReport, EngineStats
+│   ├── database.py               # Core SQLite WAL engine, HKDF v2, SIV keys
+│   ├── cache.py                  # Two-Tier L1 RAM/Redis + L2 SQLite caching engine
+│   ├── adapters.py               # Copy-isolated MemoryL1, Zstd L1, ENC1 RedisL1
+│   ├── cloud_sync.py             # Chunked ENCSNAP1:CHK1: streaming S3/R2 backups
+│   ├── bloom_filter.py           # Auto-scaling BLAKE2b double-hash Bloom filter
+│   ├── transaction.py            # BEGIN IMMEDIATE ACID multi-key transactions
+│   ├── write_behind.py           # Re-queue-safe async write-behind batch engine
+│   └── secure_json.py            # Drop-in load_json / save_json API
+├── assets/
+│   ├── architecture_v3.png       # v3.0 architecture infographic (Feather Engine)
+│   └── envelope_kek_dek.png      # KEK/DEK envelope & HKDF key hierarchy visual
+├── generate_visuals.py           # Feather 2D Rust-accelerated diagram generator
+├── tests/                        # 140+ unit & integration tests
+├── pyproject.toml                # PEP 621 package configuration
+└── README.md                     # Documentation
 ```
 
 ---

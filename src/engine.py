@@ -6,6 +6,8 @@ each with its own encryption key, algorithm, compression codec, L1 cache, Bloom 
 blind index fields, event bus, and WAL connection pool.
 """
 
+from __future__ import annotations
+
 import os
 import time
 import zlib
@@ -17,7 +19,7 @@ import sqlite3
 import asyncio
 import threading
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, TypeVar
 from cryptography.fernet import Fernet, InvalidToken
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives import hashes
@@ -28,12 +30,16 @@ from .bloom_filter import BloomFilter
 from .adapters import BaseL1Adapter, MemoryL1Adapter
 from .events import EventDispatcher
 from .keyring_manager import KeyManager
+from .envelope import EnvelopeKeyring, unwrap_dek
+from .collection import Collection
+from .models import IntegrityReport, RotationReport, EngineStats
 from . import serializers
 from .database import (
     ConcurrentModificationError,
     derive_key_from_passphrase,
     derive_indexing_key,
     derive_key_encryption_subkeys,
+    get_active_kdf_algorithm,
     _extract_field_values,
     _get_decrypt_executor,
     _PREFIX_GCM,
@@ -48,6 +54,8 @@ from .database import (
     _zstd_decompressor,
     _SQLITE_MAX_VARS,
 )
+
+T = TypeVar("T")
 
 _MAX_DECOMPRESSED_BYTES = 256 * 1024 * 1024  # 256 MiB decompression bomb cap
 
@@ -205,6 +213,8 @@ class EncryptedSQLite:
         max_l1_items: int = 1000,
         default_l1_ttl: float = 86400.0,
         l1_adapter: BaseL1Adapter | None = None,
+        envelope_encryption: bool = True,
+        slot_id: str | None = None,
     ):
         if db_path is None:
             env_db = os.getenv("ENCRYPTED_SQLITE_DB_PATH")
@@ -218,6 +228,10 @@ class EncryptedSQLite:
         self.compression: str = compression.upper()
         self.encrypt_keys: bool = encrypt_keys
         self.default_l1_ttl: float = default_l1_ttl
+        self._envelope_requested: bool = envelope_encryption
+        self.envelope_enabled: bool = envelope_encryption
+        self._active_slot_id: str = slot_id or EnvelopeKeyring.PRIMARY_SLOT
+        self._passphrase_mode: bool = passphrase is not None
 
         self._indexed_fields: set[str] = (
             {str(f).strip() for f in indexed_fields if str(f).strip()} if indexed_fields else set()
@@ -228,22 +242,6 @@ class EncryptedSQLite:
         self._cache_lock = threading.RLock()
         self._initialized = False
 
-        # Key initialization (explicit key -> passphrase -> env -> KeyManager -> generate via KeyManager)
-        if passphrase is not None:
-            salt_file = self.data_dir / f".{self.db_path.stem}.salt"
-            self.data_dir.mkdir(parents=True, exist_ok=True)
-            if salt_file.exists() and len(salt_file.read_bytes()) >= 16:
-                salt = salt_file.read_bytes()[:16]
-            else:
-                salt = os.urandom(16)
-                salt_file.write_bytes(salt)
-            raw_key, _ = derive_key_from_passphrase(passphrase, salt=salt)
-            self._set_raw_key(raw_key)
-        elif key is not None:
-            self._set_raw_key(self._normalize_key(key))
-        else:
-            self._set_raw_key(self._load_or_create_key())
-
         self._adapter: BaseL1Adapter = l1_adapter or MemoryL1Adapter(max_capacity=max_l1_items)
         self.bloom = BloomFilter(expected_elements=max(5000, max_l1_items * 10), false_positive_rate=0.01)
         self.events = EventDispatcher()
@@ -251,7 +249,108 @@ class EncryptedSQLite:
         self._misses = 0
         self._writes = 0
 
-        self._init_schema()
+        # Ensure SQLite tables (including vault_key_slots) exist before unlocking KEK/DEK
+        self._ensure_tables()
+        self._unlock_vault_keys(key=key, passphrase=passphrase, slot_id=slot_id, envelope_encryption=envelope_encryption)
+        self.rebuild_bloom_filter()
+        self._initialized = True
+
+    def _ensure_tables(self):
+        conn = self.get_connection()
+        with conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS kv_store (
+                    key TEXT PRIMARY KEY,
+                    value BLOB NOT NULL,
+                    version INTEGER NOT NULL DEFAULT 1,
+                    expires_at INTEGER NOT NULL DEFAULT 0,
+                    updated_at INTEGER NOT NULL
+                );
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_kv_expires ON kv_store (expires_at);")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_kv_expires_updated ON kv_store (expires_at, updated_at DESC);")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS blind_indexes (
+                    key TEXT NOT NULL,
+                    field_name TEXT NOT NULL,
+                    field_hash TEXT NOT NULL,
+                    PRIMARY KEY (key, field_name, field_hash)
+                );
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_blind_hash ON blind_indexes (field_name, field_hash);")
+            EnvelopeKeyring.ensure_schema(conn)
+
+    def _unlock_vault_keys(
+        self,
+        key: str | bytes | None = None,
+        passphrase: str | None = None,
+        slot_id: str | None = None,
+        envelope_encryption: bool = True,
+    ):
+        conn = self.get_connection()
+        has_slots = EnvelopeKeyring.has_slots(conn)
+        use_envelope = envelope_encryption or has_slots
+        self.envelope_enabled = use_envelope
+
+        if passphrase is not None:
+            slot_rows = EnvelopeKeyring.get_all_slot_rows(conn) if has_slots else []
+            ordered_slots = (
+                [r for r in slot_rows if r["slot_id"] == slot_id] + [r for r in slot_rows if r["slot_id"] != slot_id]
+                if slot_id
+                else slot_rows
+            )
+            # First try unlocking any existing passphrase-derived slot (e.g. primary or recovery slot)
+            for row in ordered_slots:
+                salt = row["kdf_salt"]
+                algo = row["kdf_algo"]
+                if salt and algo and algo != "RAW":
+                    try:
+                        cand_kek, _ = derive_key_from_passphrase(passphrase, salt=bytes(salt), algorithm=algo)
+                        dek = unwrap_dek(row["wrapped_dek"], cand_kek, row["slot_id"])
+                        self._kek = cand_kek
+                        self._active_slot_id = row["slot_id"]
+                        self._set_raw_key(dek)
+                        return
+                    except Exception:
+                        continue
+
+            salt_file = self.data_dir / f".{self.db_path.stem}.salt"
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+            if salt_file.exists() and len(salt_file.read_bytes()) >= 16:
+                salt = salt_file.read_bytes()[:16]
+            else:
+                salt = os.urandom(16)
+                salt_file.write_bytes(salt)
+            kdf_algo = get_active_kdf_algorithm()
+            kek, _ = derive_key_from_passphrase(passphrase, salt=salt, algorithm=kdf_algo)
+            self._kek = kek
+            if use_envelope:
+                dek = EnvelopeKeyring.initialize_or_unlock(
+                    conn, kek=kek, slot_id=slot_id, kdf_algo=kdf_algo, kdf_salt=salt
+                )
+                self._set_raw_key(dek)
+            else:
+                self._set_raw_key(kek)
+            return
+
+        kek = self._normalize_key(key) if key is not None else self._load_or_create_key()
+        self._kek = kek
+        if use_envelope:
+            dek = EnvelopeKeyring.initialize_or_unlock(conn, kek=kek, slot_id=slot_id, kdf_algo="RAW")
+            self._set_raw_key(dek)
+        else:
+            self._set_raw_key(kek)
+
+    def _reload_envelope_after_restore(self):
+        """Re-unlock DEK from restored database slots if envelope encryption is active."""
+        conn = self.get_connection()
+        if EnvelopeKeyring.has_slots(conn) and hasattr(self, "_kek"):
+            try:
+                dek = EnvelopeKeyring.initialize_or_unlock(conn, kek=self._kek, slot_id=self._active_slot_id)
+                self._set_raw_key(dek)
+                self.envelope_enabled = True
+            except Exception:
+                pass
 
     @staticmethod
     def _normalize_key(raw_key: str | bytes) -> bytes:
@@ -297,7 +396,7 @@ class EncryptedSQLite:
         self._key_siv_mac, self._key_siv_enc = derive_key_encryption_subkeys(raw_32)
 
     def _get_raw_key_material(self) -> bytes:
-        return self._raw_key
+        return getattr(self, "_kek", self._raw_key)
 
     @property
     def cache(self):
@@ -378,28 +477,7 @@ class EncryptedSQLite:
     def _init_schema(self):
         if self._initialized:
             return
-        conn = self.get_connection()
-        with conn:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS kv_store (
-                    key TEXT PRIMARY KEY,
-                    value BLOB NOT NULL,
-                    version INTEGER NOT NULL DEFAULT 1,
-                    expires_at INTEGER NOT NULL DEFAULT 0,
-                    updated_at INTEGER NOT NULL
-                );
-            """)
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_kv_expires ON kv_store (expires_at);")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_kv_expires_updated ON kv_store (expires_at, updated_at DESC);")
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS blind_indexes (
-                    key TEXT NOT NULL,
-                    field_name TEXT NOT NULL,
-                    field_hash TEXT NOT NULL,
-                    PRIMARY KEY (key, field_name, field_hash)
-                );
-            """)
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_blind_hash ON blind_indexes (field_name, field_hash);")
+        self._ensure_tables()
         self.rebuild_bloom_filter()
         self._initialized = True
 
@@ -840,13 +918,74 @@ class EncryptedSQLite:
         self.rebuild_bloom_filter()
         return cur.rowcount
 
-    def rotate_key(self, new_key: str | bytes, strict: bool = True) -> dict:
+    def rotate_kek(self, new_key: str | bytes, slot_id: str = EnvelopeKeyring.PRIMARY_SLOT) -> RotationReport:
+        """O(1) instant KEK rotation: re-wraps the 32-byte DEK without re-encrypting rows."""
+        if not self.envelope_enabled:
+            raise RuntimeError("rotate_kek() requires envelope_encryption=True.")
+        new_kek = self._normalize_key(new_key)
+        conn = self.get_connection()
+        EnvelopeKeyring.rotate_kek(conn, self._raw_key, new_kek, slot_id=slot_id, kdf_algo="RAW")
+        if slot_id == self._active_slot_id:
+            self._kek = new_kek
+        return RotationReport(
+            status="ok",
+            mode="kek_envelope_o1",
+            rotated_count=0,
+            failed_count=0,
+            failed_keys=[],
+            message=f"O(1) KEK rotation completed for slot '{slot_id}'.",
+        )
+
+    def add_recovery_slot(
+        self,
+        slot_id: str,
+        recovery_key: str | bytes | None = None,
+        recovery_passphrase: str | None = None,
+    ) -> dict[str, Any]:
+        """Wrap the active DEK under an additional recovery key or Argon2id/PBKDF2 passphrase slot."""
+        if not self.envelope_enabled:
+            raise RuntimeError("Recovery slots require envelope_encryption=True.")
+        if recovery_key is None and recovery_passphrase is None:
+            raise ValueError("Provide either recovery_key or recovery_passphrase.")
+
+        conn = self.get_connection()
+        if recovery_passphrase is not None:
+            salt = os.urandom(16)
+            kdf_algo = get_active_kdf_algorithm()
+            slot_kek, _ = derive_key_from_passphrase(recovery_passphrase, salt=salt, algorithm=kdf_algo)
+            EnvelopeKeyring.add_slot(conn, self._raw_key, slot_id, slot_kek, kdf_algo=kdf_algo, kdf_salt=salt)
+            return {"status": "ok", "slot_id": slot_id, "kdf_algo": kdf_algo}
+
+        assert recovery_key is not None
+        slot_kek = self._normalize_key(recovery_key)
+        EnvelopeKeyring.add_slot(conn, self._raw_key, slot_id, slot_kek, kdf_algo="RAW")
+        return {"status": "ok", "slot_id": slot_id, "kdf_algo": "RAW"}
+
+    def remove_recovery_slot(self, slot_id: str) -> bool:
+        """Remove a recovery key slot from vault_key_slots."""
+        return EnvelopeKeyring.remove_slot(self.get_connection(), slot_id)
+
+    def list_key_slots(self) -> list[dict[str, Any]]:
+        """List configured KEK unlock slots (metadata only)."""
+        return EnvelopeKeyring.list_slots(self.get_connection())
+
+    def rotate_key(self, new_key: str | bytes, strict: bool = True, deep_rekey: bool = False) -> RotationReport:
+        """
+        Rotate the vault key.
+        - By default when envelope encryption is active, performs O(1) KEK re-wrapping (`mode="kek_envelope_o1"`).
+        - With `deep_rekey=True` (or when envelope encryption is disabled), re-encrypts every row under a fresh DEK.
+        """
+        if self.envelope_enabled and not deep_rekey:
+            return self.rotate_kek(new_key, slot_id=self._active_slot_id)
+
         conn = self.get_connection()
         rows = conn.execute("SELECT key, value, version, expires_at, updated_at FROM kv_store").fetchall()
         old_raw = self._raw_key
-        new_raw = self._normalize_key(new_key)
+        new_kek = self._normalize_key(new_key)
+        new_dek = AESGCM.generate_key(bit_length=256) if self.envelope_enabled else new_kek
 
         decoded_rows = []
+        failed_keys = []
         for r in rows:
             s_key = r["key"]
             try:
@@ -854,10 +993,12 @@ class EncryptedSQLite:
                 data = self.decrypt_and_unpack(r["value"], associated_data=pk.encode("utf-8"))
                 decoded_rows.append((s_key, pk, data, r["version"], r["expires_at"], r["updated_at"]))
             except Exception as e:
+                failed_keys.append(s_key)
                 if strict:
                     raise RuntimeError(f"Key rotation aborted on '{s_key}': {e}") from e
 
-        self._set_raw_key(new_raw)
+        self._set_raw_key(new_dek)
+        self._kek = new_kek
         with conn:
             for old_s_key, pk, data, ver, exp, ts in decoded_rows:
                 new_s_key = self._to_storage_key(pk)
@@ -876,8 +1017,61 @@ class EncryptedSQLite:
                     )
                 self._update_blind_indexes(conn, new_s_key, data)
 
+        if self.envelope_enabled:
+            EnvelopeKeyring.rotate_kek(conn, new_dek, new_kek, slot_id=self._active_slot_id, kdf_algo="RAW")
+
         self.rebuild_bloom_filter()
-        return {"status": "ok", "rotated_count": len(decoded_rows)}
+        return RotationReport(
+            status="ok",
+            mode="deep_dek_rekey",
+            rotated_count=len(decoded_rows),
+            failed_count=len(failed_keys),
+            failed_keys=failed_keys,
+            message=f"Deep DEK re-key completed for {len(decoded_rows)} record(s).",
+        )
+
+    def collection(
+        self,
+        name: str,
+        schema: type[T] | None = None,
+        indexes: list[str] | set[str] | None = None,
+    ) -> Collection[T]:
+        """Return a typed, namespaced Collection[T] backed by this EncryptedSQLite instance."""
+        return Collection(self, name=name, schema=schema, indexes=indexes)
+
+    def verify_integrity(self) -> IntegrityReport:
+        """Perform a cryptographic AEAD integrity audit across all records in this database."""
+        conn = self.get_connection()
+        rows = conn.execute("SELECT key, value FROM kv_store").fetchall()
+        total = len(rows)
+        valid_count = 0
+        corrupted_keys: list[dict[str, str]] = []
+
+        for row in rows:
+            stored_key = row["key"]
+            try:
+                plain_key = self._decrypt_key(stored_key)
+                data = self.decrypt_and_unpack(row["value"], associated_data=plain_key.encode("utf-8"))
+                if data is not None:
+                    valid_count += 1
+                else:
+                    corrupted_keys.append({"key": plain_key, "reason": "Decoded payload is None"})
+            except Exception as e:
+                corrupted_keys.append({"key": stored_key, "reason": f"Decryption/verification failed: {e}"})
+
+        is_clean = len(corrupted_keys) == 0
+        return IntegrityReport(
+            status="clean" if is_clean else "corrupted",
+            total_records=total,
+            valid_records=valid_count,
+            corrupted_records=len(corrupted_keys),
+            corrupted_keys=corrupted_keys,
+            message=(
+                "All records passed 100% cryptographic integrity verification."
+                if is_clean
+                else f"Found {len(corrupted_keys)} corrupted/tampered records!"
+            ),
+        )
 
     def transaction(self) -> _EngineTransaction:
         return _EngineTransaction(self)
@@ -888,21 +1082,24 @@ class EncryptedSQLite:
     def off(self, event: str, callback: Callable) -> bool:
         return self.events.off(event, callback)
 
-    def stats(self) -> dict:
+    def stats(self) -> EngineStats:
+        slot_count = len(self.list_key_slots()) if self.envelope_enabled else 0
         with self._cache_lock:
             total = self._hits + self._misses
             ratio = (self._hits / total * 100.0) if total > 0 else 100.0
-            return {
-                "db_path": str(self.db_path),
-                "algorithm": self.algorithm,
-                "encrypt_keys": self.encrypt_keys,
-                "l1_items_cached": self._adapter.size(),
-                "hits": self._hits,
-                "misses": self._misses,
-                "writes": self._writes,
-                "hit_ratio_percent": round(ratio, 2),
-                "stored_documents": self.count(),
-            }
+            return EngineStats(
+                db_path=str(self.db_path),
+                algorithm=self.algorithm,
+                encrypt_keys=self.encrypt_keys,
+                envelope_enabled=self.envelope_enabled,
+                key_slots=slot_count,
+                l1_items_cached=self._adapter.size(),
+                hits=self._hits,
+                misses=self._misses,
+                writes=self._writes,
+                hit_ratio_percent=round(ratio, 2),
+                stored_documents=self.count(),
+            )
 
     # Async convenience wrappers
     async def aget(self, key: str, default: Any = None) -> Any:

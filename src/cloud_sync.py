@@ -390,6 +390,8 @@ class CloudSyncEngine:
 
             # Reset L1 cache and rebuild Bloom filter from restored DB
             if self._engine is not None:
+                if hasattr(self._engine, "_reload_envelope_after_restore"):
+                    self._engine._reload_envelope_after_restore()
                 self._engine.cache.clear_l1()
                 self._engine.rebuild_bloom_filter()
             else:

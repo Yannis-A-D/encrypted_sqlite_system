@@ -3,9 +3,11 @@ Encrypted SQLite JSON & Two-Tier Caching Engine
 A high-performance, AES-256-GCM / ChaCha20-Poly1305 / Fernet encrypted, thread-safe SQLite & in-memory caching system for Python applications.
 """
 
+from .engine import EncryptedSQLite
 from .database import (
     init_db,
     get_db_connection,
+    close_all_connections,
     kv_get,
     kv_get_with_expiry,
     kv_set,
@@ -20,6 +22,10 @@ from .database import (
     kv_find_by_index,
     set_indexed_fields,
     get_indexed_fields,
+    set_key_encryption,
+    get_key_encryption,
+    encrypt_db_key,
+    decrypt_db_key,
     get_active_compression,
     set_active_compression,
     get_active_kdf_algorithm,
@@ -63,11 +69,14 @@ from .metrics import metrics, MetricsCollector, start_metrics_server
 from .transaction import Transaction, AsyncTransaction, transaction, async_transaction
 from . import serializers
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 __all__ = [
+    "EncryptedSQLite",
     "init_db",
     "get_db_connection",
+    "close_all_connections",
     "kv_get",
+    "kv_get_with_expiry",
     "kv_set",
     "kv_get_versioned",
     "kv_set_versioned",
@@ -80,12 +89,23 @@ __all__ = [
     "kv_find_by_index",
     "set_indexed_fields",
     "get_indexed_fields",
+    "set_key_encryption",
+    "get_key_encryption",
+    "encrypt_db_key",
+    "decrypt_db_key",
     "get_active_compression",
     "set_active_compression",
+    "get_active_kdf_algorithm",
+    "derive_key_from_passphrase",
     "kv_count",
     "purge_expired_records",
     "scavenger",
     "TTLScavenger",
+    "TTLReaper",
+    "start_ttl_reaper",
+    "stop_ttl_reaper",
+    "get_ttl_reaper",
+    "KeyManager",
     "rotate_encryption_key",
     "db_maintenance",
     "bloom",

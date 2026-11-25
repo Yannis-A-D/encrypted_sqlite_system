@@ -1,14 +1,32 @@
 """
-adapters.py — Pluggable Distributed L1 Cache Adapters (Redis / In-Memory).
+adapters.py — Pluggable Distributed & Isolated L1 Cache Adapters (Redis / In-Memory).
 
-Allows TwoTierCache to seamlessly scale across multiple server instances or cluster nodes
-using Redis as a shared distributed L1 cache layer, with SQLite WAL as the persistent encrypted L2 store.
+Features:
+- Copy-on-read/write isolation in MemoryL1Adapter preventing uncommitted caller mutations
+  from corrupting cached state across rollbacks or concurrent threads.
+- End-to-end AEAD encryption in RedisL1Adapter (ENC1: envelope) so shared Redis clusters
+  never see plaintext application data.
+- Bounded decompression protection in CompressedMemoryL1Adapter.
 """
 
-import json
+import copy
 import time
+import base64
 from typing import Any
 from collections import OrderedDict
+
+_IMMUTABLE_PRIMITIVES = (str, int, float, bool, bytes, type(None))
+_REDIS_ENC_PREFIX = "ENC1:"
+_MAX_L1_DECOMPRESSED = 256 * 1024 * 1024  # 256 MiB cap
+
+
+def _clone_value(val: Any) -> Any:
+    """Fast copy-isolation for mutable containers while keeping primitives zero-copy."""
+    if isinstance(val, _IMMUTABLE_PRIMITIVES):
+        return val
+    if isinstance(val, tuple) and all(isinstance(x, _IMMUTABLE_PRIMITIVES) for x in val):
+        return val
+    return copy.deepcopy(val)
 
 
 class BaseL1Adapter:
@@ -30,7 +48,7 @@ class BaseL1Adapter:
 
 
 class MemoryL1Adapter(BaseL1Adapter):
-    """Default high-speed thread-safe in-memory LRU adapter (<0.01ms)."""
+    """Default high-speed thread-safe in-memory LRU adapter (<0.01ms) with mutation isolation."""
     def __init__(self, max_capacity: int = 1000):
         self.max_capacity = max_capacity
         self.store: OrderedDict[str, tuple[Any, float]] = OrderedDict()
@@ -41,7 +59,7 @@ class MemoryL1Adapter(BaseL1Adapter):
             now = time.time()
             if expire_at == 0 or now < expire_at:
                 self.store.move_to_end(key)
-                return val, True
+                return _clone_value(val), True
             else:
                 del self.store[key]
         return None, False
@@ -51,7 +69,7 @@ class MemoryL1Adapter(BaseL1Adapter):
         expire_at = (now + ttl_seconds) if ttl_seconds > 0 else 0
         if key in self.store:
             self.store.move_to_end(key)
-        self.store[key] = (value, expire_at)
+        self.store[key] = (_clone_value(value), expire_at)
         if len(self.store) > self.max_capacity:
             self.store.popitem(last=False)
 
@@ -69,13 +87,13 @@ class CompressedMemoryL1Adapter(BaseL1Adapter):
     """
     Ultra-Fast In-Memory L1 Compressed Cache Adapter.
     Compresses data in RAM using adaptive Zstandard or zlib, reducing RAM usage by 70-80%
-    while maintaining sub-millisecond lookups.
+    while maintaining sub-millisecond lookups and natural mutation isolation.
     """
     def __init__(self, max_capacity: int = 10000, codec: str = "auto"):
         self.max_capacity = max_capacity
         self.store: OrderedDict[str, tuple[bytes, float]] = OrderedDict()
         self.codec = codec.lower()
-        
+
         try:
             import zstandard as zstd
             self._has_zstd = True
@@ -99,16 +117,23 @@ class CompressedMemoryL1Adapter(BaseL1Adapter):
                     from . import serializers
                     if raw_blob.startswith(b"ZS1:"):
                         if self._has_zstd and self._zstd_decompressor is not None:
-                            decompressed = self._zstd_decompressor.decompress(raw_blob[4:])
+                            decompressed = self._zstd_decompressor.decompress(
+                                raw_blob[4:], max_output_size=_MAX_L1_DECOMPRESSED
+                            )
                         else:
                             import zstandard as zstd
-                            decompressed = zstd.ZstdDecompressor().decompress(raw_blob[4:])
+                            decompressed = zstd.ZstdDecompressor().decompress(
+                                raw_blob[4:], max_output_size=_MAX_L1_DECOMPRESSED
+                            )
                     elif raw_blob.startswith(b"ZL1:"):
-                        decompressed = self._zlib.decompress(raw_blob[4:])
+                        dobj = self._zlib.decompressobj()
+                        decompressed = dobj.decompress(raw_blob[4:], _MAX_L1_DECOMPRESSED)
+                        if dobj.unconsumed_tail:
+                            raise ValueError("Compressed L1 entry exceeds max output size.")
                     else:
-                        # Legacy unprefixed zlib
                         try:
-                            decompressed = self._zlib.decompress(raw_blob)
+                            dobj = self._zlib.decompressobj()
+                            decompressed = dobj.decompress(raw_blob, _MAX_L1_DECOMPRESSED)
                         except Exception:
                             decompressed = raw_blob
                     return serializers.loads(decompressed), True
@@ -150,15 +175,22 @@ class CompressedMemoryL1Adapter(BaseL1Adapter):
 
 class RedisL1Adapter(BaseL1Adapter):
     """
-    Distributed Redis L1 Cache Adapter.
-    Enables distributed caching across multiple processes / nodes.
+    Zero-Knowledge Distributed Redis L1 Cache Adapter.
+    Encrypts cached payloads with AEAD (bound to the Redis key via AAD) before transmitting
+    to Redis so shared cache nodes never store plaintext data.
     """
-    def __init__(self, redis_client_or_url: Any, prefix: str = "enc_sqlite:l1:"):
+    def __init__(
+        self,
+        redis_client_or_url: Any,
+        prefix: str = "enc_sqlite:l1:",
+        encrypt_payloads: bool = True,
+    ):
         self.prefix = prefix
+        self.encrypt_payloads = encrypt_payloads
         if isinstance(redis_client_or_url, str):
             try:
                 import redis
-                self.client = redis.from_url(redis_client_or_url, decode_responses=True)
+                self.client = redis.from_url(redis_client_or_url, decode_responses=False)
             except ImportError:
                 raise ImportError("Please install redis package to use RedisL1Adapter: pip install redis")
         else:
@@ -167,25 +199,52 @@ class RedisL1Adapter(BaseL1Adapter):
     def _format_key(self, key: str) -> str:
         return f"{self.prefix}{key}"
 
+    def _iter_prefixed_keys(self) -> list[Any]:
+        pattern = f"{self.prefix}*"
+        if hasattr(self.client, "scan_iter"):
+            return list(self.client.scan_iter(match=pattern, count=500))
+        return list(self.client.keys(pattern))
+
     def get(self, key: str) -> tuple[Any, bool]:
         try:
-            from . import serializers
-            raw = self.client.get(self._format_key(key))
-            if raw is not None:
-                return serializers.loads(raw), True
+            r_key = self._format_key(key)
+            raw = self.client.get(r_key)
+            if raw is None:
+                return None, False
+
+            if isinstance(raw, bytes):
+                raw_str = raw.decode("utf-8", errors="surrogateescape")
+            else:
+                raw_str = str(raw)
+
+            if raw_str.startswith(_REDIS_ENC_PREFIX):
+                from .database import decrypt_and_unpack
+                enc_blob = base64.urlsafe_b64decode(raw_str[len(_REDIS_ENC_PREFIX):].encode("ascii"))
+                return decrypt_and_unpack(enc_blob, associated_data=r_key.encode("utf-8")), True
+
+            if not self.encrypt_payloads:
+                from . import serializers
+                payload = raw if isinstance(raw, (bytes, bytearray)) else raw_str.encode("utf-8")
+                return serializers.loads(payload), True
         except Exception:
             pass
         return None, False
 
     def set(self, key: str, value: Any, ttl_seconds: float = 0):
         try:
-            from . import serializers
-            payload = serializers.dumps(value)
             r_key = self._format_key(key)
-            if ttl_seconds > 0:
-                self.client.setex(r_key, int(ttl_seconds), payload)
+            if self.encrypt_payloads:
+                from .database import pack_and_encrypt
+                enc_blob = pack_and_encrypt(value, associated_data=r_key.encode("utf-8"))
+                wire_payload = _REDIS_ENC_PREFIX + base64.urlsafe_b64encode(enc_blob).decode("ascii")
             else:
-                self.client.set(r_key, payload)
+                from . import serializers
+                wire_payload = serializers.dumps(value)
+
+            if ttl_seconds > 0:
+                self.client.setex(r_key, max(1, int(ttl_seconds)), wire_payload)
+            else:
+                self.client.set(r_key, wire_payload)
         except Exception:
             pass
 
@@ -197,7 +256,7 @@ class RedisL1Adapter(BaseL1Adapter):
 
     def clear(self):
         try:
-            keys = self.client.keys(f"{self.prefix}*")
+            keys = self._iter_prefixed_keys()
             if keys:
                 self.client.delete(*keys)
         except Exception:
@@ -205,6 +264,6 @@ class RedisL1Adapter(BaseL1Adapter):
 
     def size(self) -> int:
         try:
-            return len(self.client.keys(f"{self.prefix}*"))
+            return len(self._iter_prefixed_keys())
         except Exception:
             return 0

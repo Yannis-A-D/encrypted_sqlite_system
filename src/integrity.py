@@ -44,20 +44,22 @@ def verify_database_integrity() -> dict[str, Any]:
     corrupted_keys = []
 
     for row in rows:
-        key = row["key"]
+        stored_key = row["key"]
         val_blob = row["value"]
 
         try:
+            from .database import decrypt_db_key
+            plain_key = decrypt_db_key(stored_key)
             # Cryptographic AEAD tag / Fernet HMAC verification & decryption
-            data = decrypt_and_unpack(val_blob, associated_data=key.encode("utf-8"))
+            data = decrypt_and_unpack(val_blob, associated_data=plain_key.encode("utf-8"))
             if data is not None:
                 valid_count += 1
             else:
-                corrupted_keys.append({"key": key, "reason": "Decoded payload is None"})
+                corrupted_keys.append({"key": plain_key, "reason": "Decoded payload is None"})
         except InvalidToken:
-            corrupted_keys.append({"key": key, "reason": "Cryptographic signature mismatch (InvalidToken / Tampered)"})
+            corrupted_keys.append({"key": stored_key, "reason": "Cryptographic signature mismatch (InvalidToken / Tampered)"})
         except Exception as e:
-            corrupted_keys.append({"key": key, "reason": f"Decryption/Decompression failed: {e}"})
+            corrupted_keys.append({"key": stored_key, "reason": f"Decryption/Decompression failed: {e}"})
 
     is_clean = len(corrupted_keys) == 0
     return {

@@ -183,7 +183,7 @@ class TwoTierCache:
 
         if self._write_behind_engine is not None:
             for k, val in mapping.items():
-                self._write_behind_engine.queue_write(k, val)
+                self._write_behind_engine.queue_write(k, val, ttl=db_ttl)
         else:
             from .database import kv_mset
             kv_mset(mapping, ttl=db_ttl)

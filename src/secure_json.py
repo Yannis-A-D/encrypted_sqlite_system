@@ -16,17 +16,23 @@ from cryptography.exceptions import InvalidTag
 from cryptography.fernet import InvalidToken
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM, ChaCha20Poly1305
 from .database import (
-    _get_cipher, _get_ciphers, _get_chacha_cipher, get_active_algorithm, DATA_DIR,
-    _PREFIX_GCM, _PREFIX_FERNET, _PREFIX_CHACHA
+    _get_cipher, _get_ciphers, _get_ciphers_v2, _get_chacha_cipher, get_active_algorithm, DATA_DIR,
+    _PREFIX_GCM, _PREFIX_FERNET, _PREFIX_CHACHA, _SUBKEY_V2_TAG
 )
 from .cache import cache
 
 
 def _resolve_path(path: str | Path) -> Path:
-    """Resolve file path relative to data directory if not absolute."""
+    """Resolve file path relative to data directory safely (rejecting path traversal on relative keys)."""
     p = Path(path)
     if p.is_absolute():
         return p
+    if ".." in p.parts:
+        raise ValueError(f"Unsafe relative key path containing traversal segments: {path}")
+    base = DATA_DIR.resolve()
+    resolved = (DATA_DIR / p.name).resolve()
+    if not resolved.is_relative_to(base):
+        raise ValueError(f"Resolved path escapes DATA_DIR: {path}")
     return DATA_DIR / p.name
 
 
@@ -65,42 +71,42 @@ def load_json(path: str | Path, default: Any = _DEFAULT_UNSET) -> Any:
     )
     aad = key_name.encode("utf-8")
 
-    # Try decryption first
+    # Try decryption first (supporting both HKDF v2 subkeys and legacy v1 keys)
     try:
         decrypted = None
+        gcm_v1, fernet_v1 = _get_ciphers()
+        gcm_v2, fernet_v2, chacha_v2 = _get_ciphers_v2()
+
         if raw.startswith(_PREFIX_GCM):
-            cipher_gcm, _ = _get_ciphers()
             actual_blob = raw[5:]
+            use_gcm = gcm_v2 if actual_blob.startswith(_SUBKEY_V2_TAG) else gcm_v1
+            if actual_blob.startswith(_SUBKEY_V2_TAG):
+                actual_blob = actual_blob[len(_SUBKEY_V2_TAG):]
             if len(actual_blob) < 12:
                 raise ValueError("Missing GCM nonce.")
-            nonce = actual_blob[:12]
-            ciphertext = actual_blob[12:]
-            decrypted = cipher_gcm.decrypt(nonce, ciphertext, associated_data=aad)
+            decrypted = use_gcm.decrypt(actual_blob[:12], actual_blob[12:], associated_data=aad)
         elif raw.startswith(_PREFIX_CHACHA):
-            chacha = _get_chacha_cipher()
             actual_blob = raw[5:]
+            use_chacha = chacha_v2 if actual_blob.startswith(_SUBKEY_V2_TAG) else _get_chacha_cipher()
+            if actual_blob.startswith(_SUBKEY_V2_TAG):
+                actual_blob = actual_blob[len(_SUBKEY_V2_TAG):]
             if len(actual_blob) < 12:
                 raise ValueError("Missing ChaCha20 nonce.")
-            nonce = actual_blob[:12]
-            ciphertext = actual_blob[12:]
-            decrypted = chacha.decrypt(nonce, ciphertext, associated_data=aad)
+            decrypted = use_chacha.decrypt(actual_blob[:12], actual_blob[12:], associated_data=aad)
         elif raw.startswith(_PREFIX_FERNET):
-            _, cipher_fernet = _get_ciphers()
             actual_blob = raw[5:]
-            decrypted = cipher_fernet.decrypt(actual_blob)
+            if actual_blob.startswith(_SUBKEY_V2_TAG):
+                decrypted = fernet_v2.decrypt(actual_blob[len(_SUBKEY_V2_TAG):])
+            else:
+                decrypted = fernet_v1.decrypt(actual_blob)
         elif raw[0] == 0x80 or raw.startswith(b"gAAAA"):
-            # Legacy unprefixed Fernet token
-            _, cipher_fernet = _get_ciphers()
-            decrypted = cipher_fernet.decrypt(raw)
+            decrypted = fernet_v1.decrypt(raw)
         else:
-            # Fallback to active cipher
             cipher_active = _get_cipher()
             if isinstance(cipher_active, (AESGCM, ChaCha20Poly1305)):
                 if len(raw) < 12:
                     raise ValueError("Missing AEAD nonce.")
-                nonce = raw[:12]
-                ciphertext = raw[12:]
-                decrypted = cipher_active.decrypt(nonce, ciphertext, associated_data=aad)
+                decrypted = cipher_active.decrypt(raw[:12], raw[12:], associated_data=aad)
             else:
                 decrypted = cipher_active.decrypt(raw)
 
@@ -123,15 +129,20 @@ def load_json(path: str | Path, default: Any = _DEFAULT_UNSET) -> Any:
         return fallback
 
 
-def save_json(path: str | Path, data: Any, indent: int = 2, ttl: float | None = None):
+def save_json(
+    path: str | Path,
+    data: Any,
+    indent: int = 2,
+    ttl: float | None = None,
+    mirror_to_disk: bool | None = None,
+):
     """
     Serialise data to JSON, encrypt it, and write to:
     1. L1 Memory Cache (<0.01ms access)
-    2. L2 Encrypted SQLite Database (bot_database.db)
-    3. Atomically to encrypted disk file
+    2. L2 Encrypted SQLite Database
+    3. Optionally atomically to an encrypted disk mirror file (configurable via mirror_to_disk or MIRROR_JSON_TO_DISK)
     """
     path = _resolve_path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
     key_name = path.name
 
     # 1. Update Two-Tier Cache (L1 RAM + L2 SQLite)
@@ -140,35 +151,40 @@ def save_json(path: str | Path, data: Any, indent: int = 2, ttl: float | None = 
     except Exception as e:
         print(f"[TwoTierCache] Write warning on {key_name}: {e}")
 
-    # 2. For temporary TTL records, do not write permanent static disk file
-    if ttl is not None:
-        if path.exists():
+    should_mirror = (
+        mirror_to_disk
+        if mirror_to_disk is not None
+        else os.getenv("MIRROR_JSON_TO_DISK", "true").lower() in ("true", "1", "yes")
+    )
+
+    # 2. For temporary TTL records or when disk mirroring is disabled, skip static disk file write
+    if ttl is not None or not should_mirror:
+        if ttl is not None and path.exists():
             try:
                 path.unlink()
             except Exception:
                 pass
         return
 
-    # 3. Atomic write to encrypted disk file for permanent backup safety
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    # 3. Atomic write to encrypted disk file using HKDF domain-separated v2 subkeys
     plaintext = json.dumps(data, indent=indent, ensure_ascii=False).encode("utf-8")
     aad = key_name.encode("utf-8")
+    gcm_v2, fernet_v2, chacha_v2 = _get_ciphers_v2()
 
     algo = get_active_algorithm()
     if algo == "AES-128-FERNET":
-        _, cipher_fernet = _get_ciphers()
-        ciphertext = cipher_fernet.encrypt(plaintext)
-        payload = _PREFIX_FERNET + ciphertext
+        ciphertext = fernet_v2.encrypt(plaintext)
+        payload = _PREFIX_FERNET + _SUBKEY_V2_TAG + ciphertext
     elif algo in ("CHACHA20-POLY1305", "CHACHA20", "XCHACHA20-POLY1305"):
-        chacha = _get_chacha_cipher()
         nonce = os.urandom(12)
-        ciphertext = chacha.encrypt(nonce, plaintext, associated_data=aad)
-        payload = _PREFIX_CHACHA + nonce + ciphertext
+        ciphertext = chacha_v2.encrypt(nonce, plaintext, associated_data=aad)
+        payload = _PREFIX_CHACHA + _SUBKEY_V2_TAG + nonce + ciphertext
     else:
-        # Default to AES-256-GCM
-        cipher_gcm, _ = _get_ciphers()
         nonce = os.urandom(12)
-        ciphertext = cipher_gcm.encrypt(nonce, plaintext, associated_data=aad)
-        payload = _PREFIX_GCM + nonce + ciphertext
+        ciphertext = gcm_v2.encrypt(nonce, plaintext, associated_data=aad)
+        payload = _PREFIX_GCM + _SUBKEY_V2_TAG + nonce + ciphertext
 
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_bytes(payload)

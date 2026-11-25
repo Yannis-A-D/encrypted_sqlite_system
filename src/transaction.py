@@ -1,10 +1,12 @@
 """
 transaction.py — Atomic Multi-Key Transaction Manager.
 
-Provides ACID multi-key transactions across L1 in-memory cache and L2 SQLite
-with Read-Your-Own-Writes and automatic rollback on failure.
+Provides serializable ACID multi-key transactions across L1 in-memory cache and L2 SQLite
+with Read-Your-Own-Writes, BEGIN IMMEDIATE write-lock OCC verification (eliminating TOCTOU
+races), mutation isolation, and automatic rollback on failure.
 """
 
+import copy
 import time
 import asyncio
 from typing import Any
@@ -28,11 +30,11 @@ class Transaction:
         return self._active
 
     def set(self, key: str, value: Any, ttl: float | None = None):
-        """Stage a document write within the transaction buffer."""
+        """Stage a document write within the transaction buffer (copy-isolated)."""
         if not self._active:
             raise RuntimeError("Transaction is closed and cannot accept new writes.")
         self._staged_deletes.discard(key)
-        self._staged_writes[key] = (value, ttl)
+        self._staged_writes[key] = (copy.deepcopy(value), ttl)
 
     def delete(self, key: str):
         """Stage a document deletion within the transaction buffer."""
@@ -45,24 +47,24 @@ class Transaction:
         """
         Read-Your-Own-Writes:
         1. If key was staged for deletion in this tx, return default.
-        2. If key was staged for write in this tx, return staged value.
-        3. Otherwise, fetch current value from underlying cache / SQLite.
+        2. If key was staged for write in this tx, return deep-copied staged value.
+        3. Otherwise, fetch current value & version from underlying SQLite store.
         """
         if not self._active:
             raise RuntimeError("Transaction is closed.")
         if key in self._staged_deletes:
             return default
         if key in self._staged_writes:
-            return self._staged_writes[key][0]
+            return copy.deepcopy(self._staged_writes[key][0])
 
         from .database import kv_get_versioned
         val, ver = kv_get_versioned(key, default=default)
-        if key not in self._read_versions and ver > 0:
+        if key not in self._read_versions:
             self._read_versions[key] = ver
-        return val
+        return copy.deepcopy(val)
 
     def commit(self):
-        """Atomically commit all staged writes and deletes to SQLite and L1 cache."""
+        """Atomically verify read versions under BEGIN IMMEDIATE and commit all staged mutations."""
         if not self._active:
             raise RuntimeError("Transaction is already closed.")
 
@@ -75,9 +77,11 @@ class Transaction:
             get_db_connection,
             pack_and_encrypt,
             _upsert_kv_batch,
+            _lookup_storage_row,
+            _to_storage_key,
             bloom,
             init_db,
-            ConcurrentModificationError
+            ConcurrentModificationError,
         )
         from .metrics import metrics
         from .events import events
@@ -86,39 +90,52 @@ class Transaction:
         conn = get_db_connection()
         now_ts = int(time.time())
 
-        # Optimistic concurrency verification for keys read during this transaction
-        if self._read_versions:
-            for r_key, expected_ver in self._read_versions.items():
-                if r_key in self._staged_writes or r_key in self._staged_deletes:
-                    cur = conn.execute("SELECT version FROM kv_store WHERE key = ?", (r_key,))
-                    row = cur.fetchone()
-                    current_ver = row["version"] if row else 0
-                    if current_ver != expected_ver:
-                        self.rollback()
-                        raise ConcurrentModificationError(
-                            f"Optimistic lock conflict on key '{r_key}': version was {expected_ver} at read time, but is now {current_ver}."
-                        )
-
-        # Prepare batch writes
+        # Pre-encrypt staged writes before acquiring the SQLite RESERVED lock
         batch_records = []
         raw_items = []
         for key, (data, ttl) in self._staged_writes.items():
             encrypted_blob = pack_and_encrypt(data, associated_data=key.encode("utf-8"))
             expires_at = int(now_ts + ttl) if (ttl is not None and ttl > 0) else 0
-            batch_records.append((key, encrypted_blob, expires_at, now_ts))
+            storage_key = _to_storage_key(key)
+            batch_records.append((storage_key, encrypted_blob, expires_at, now_ts))
             raw_items.append((key, data))
 
-        # Single atomic SQL transaction
-        with conn:
+        # Acquire SQLite RESERVED write lock immediately so version checks + writes are atomic (zero TOCTOU)
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            if self._read_versions:
+                for r_key, expected_ver in self._read_versions.items():
+                    if r_key in self._staged_writes or r_key in self._staged_deletes:
+                        row = _lookup_storage_row(conn, r_key, "version")
+                        current_ver = row["version"] if row else 0
+                        if current_ver != expected_ver:
+                            raise ConcurrentModificationError(
+                                f"Optimistic lock conflict on key '{r_key}': version was {expected_ver} at read time, but is now {current_ver}."
+                            )
+
             if self._staged_deletes:
-                delete_keys = list(self._staged_deletes)
-                conn.executemany("DELETE FROM blind_indexes WHERE key = ?", [(k,) for k in delete_keys])
-                conn.executemany("DELETE FROM kv_store WHERE key = ?", [(k,) for k in delete_keys])
+                delete_candidates = []
+                for dk in self._staged_deletes:
+                    sk = _to_storage_key(dk)
+                    delete_candidates.append((sk,))
+                    if sk != dk:
+                        delete_candidates.append((dk,))
+                conn.executemany("DELETE FROM blind_indexes WHERE key = ?", delete_candidates)
+                conn.executemany("DELETE FROM kv_store WHERE key = ?", delete_candidates)
 
             if batch_records:
                 _upsert_kv_batch(conn, batch_records, raw_items)
 
-        # Synchronize L1 RAM cache and Bloom Filter
+            conn.execute("COMMIT")
+        except Exception:
+            try:
+                conn.execute("ROLLBACK")
+            except Exception:
+                pass
+            self.rollback()
+            raise
+
+        # Synchronize L1 RAM cache and Bloom Filter after durable commit
         for key in self._staged_deletes:
             self._cache._adapter.delete(key)
 
@@ -126,7 +143,6 @@ class Transaction:
             self._cache.set_l1_only(key, data, ttl)
             bloom.add(key)
 
-        # Telemetry & Metrics
         try:
             if self._staged_writes:
                 metrics.record_operation("write", count=len(self._staged_writes))
@@ -135,7 +151,6 @@ class Transaction:
         except Exception:
             pass
 
-        # Reactive Event Dispatching
         try:
             for key in self._staged_deletes:
                 events.emit("delete", key=key)
@@ -160,7 +175,7 @@ class Transaction:
     def __exit__(self, exc_type, exc_val, exc_tb):
         if exc_type is not None:
             self.rollback()
-            return False  # Re-raise exception
+            return False
         else:
             if self._active:
                 self.commit()

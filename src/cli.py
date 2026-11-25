@@ -139,17 +139,23 @@ def cmd_export(args):
     print(f"\nExporting {len(rows)} documents to {out_dir} (Sanitized: {sanitize_mode})...")
     success = 0
     for row in rows:
-        key = row["key"]
+        raw_key_name = row["key"]
         val_bytes = row["value"]
         try:
-            data = decrypt_and_unpack(val_bytes)
+            from .database import decrypt_db_key
+            key = decrypt_db_key(raw_key_name)
+            try:
+                data = decrypt_and_unpack(val_bytes, associated_data=key.encode("utf-8"))
+            except Exception:
+                data = decrypt_and_unpack(val_bytes)
             if sanitize_mode:
                 data = mask_pii(data, fields=custom_fields, strategy=strategy)
-            target_file = out_dir / (key if key.endswith(".json") else f"{key}.json")
+            safe_name = Path(key).name
+            target_file = out_dir / (safe_name if safe_name.endswith(".json") else f"{safe_name}.json")
             target_file.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
             success += 1
         except Exception as e:
-            print(f" [!] Failed to process '{key}': {e}")
+            print(f" [!] Failed to process '{raw_key_name}': {e}")
 
     print(f"Export complete: {success}/{len(rows)} files saved.\n")
 

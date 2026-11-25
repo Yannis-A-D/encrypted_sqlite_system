@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "encrypted-sqlite-system"
-version = "1.0.0"
+version = "2.0.0"
 description = "High-performance, AES-256-GCM / ChaCha20-Poly1305 / Fernet encrypted SQLite document store and Two-Tier (L1/L2) caching engine for Python."
 readme = "README.md"
 authors = [
@@ -15,6 +15,8 @@ requires-python = ">=3.10"
 keywords = [
     "sqlite",
     "encryption",
+    "aes-gcm",
+    "chacha20-poly1305",
     "fernet",
     "cache",
     "lru-cache",
@@ -32,6 +34,7 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Database",
     "Topic :: Security :: Cryptography",
     "Topic :: Software Development :: Libraries :: Python Modules"
@@ -51,9 +54,15 @@ security = [
     "argon2-cffi>=23.1.0",
     "keyring>=24.0.0"
 ]
+fast = [
+    "orjson>=3.9.0",
+    "msgpack>=1.0.7",
+    "redis>=5.0.0",
+    "boto3>=1.34.0"
+]
 
 [project.scripts]
-encrypted-sqlite = "src.cli:main"
+encrypted-sqlite = "encrypted_sqlite.cli:main"
 
 [project.urls]
 "Homepage" = "https://github.com/Yannis-A-D/encrypted_sqlite_system"
@@ -62,4 +71,7 @@ encrypted-sqlite = "src.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["src*"]
+include = ["encrypted_sqlite*", "src*"]
+
+[tool.setuptools.package-data]
+encrypted_sqlite = ["py.typed"]

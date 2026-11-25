@@ -61,7 +61,7 @@ async def async_delete_json(file_or_key: str | Path) -> bool:
     """
     key = Path(file_or_key).name if isinstance(file_or_key, (str, Path)) else str(file_or_key)
     with _lock:
-        cache._l1_store.pop(key, None)
+        cache._adapter.delete(key)
 
     def _sync_delete():
         res = kv_delete(key)
